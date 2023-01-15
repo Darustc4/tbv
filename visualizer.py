@@ -24,6 +24,12 @@ class BrainVisualizer(ctk.CTk):
 
         self.axis_list = ['X', 'Y', 'Z']
         self.axis = self.axis_list[0]
+        self.zoom_list = ['x1', 'x2', 'x3', 'x4', 'x5']
+        self.zoom = 1
+
+        self.shape_list = ['Raw', 'Square']
+        self.square = False
+
         self.current_slice = 0
         self.total_slices = 0
         self.current_slice_img = None
@@ -40,7 +46,7 @@ class BrainVisualizer(ctk.CTk):
         super().__init__()
 
         self.title("Brain Visualizer")
-        self.geometry("1000x900")
+        self.geometry("1500x1400")
 
         self.create_frames()
         self.create_widgets()
@@ -71,17 +77,34 @@ class BrainVisualizer(ctk.CTk):
         # Control Frame
         self.tk_control_frame = ctk.CTkFrame(self, corner_radius=0)
         self.tk_control_frame.grid(row=2, column=0, sticky="nsew")
-        self.tk_control_frame.grid_columnconfigure(0, weight=1)
-        self.tk_control_frame.grid_columnconfigure(1, weight=1)
-        self.tk_control_frame.grid_columnconfigure(2, weight=1)
-        self.tk_control_frame.grid_columnconfigure(3, weight=1)
-        self.tk_control_frame.grid_columnconfigure(4, weight=1)
-        self.tk_control_frame.grid_columnconfigure(5, weight=1)
-        self.tk_control_frame.grid_columnconfigure(6, weight=1)
-        self.tk_control_frame.grid_columnconfigure(7, weight=1)
+
+        self.tk_control_frame.grid_columnconfigure(0, weight=1) # Dashboard Frame
+        self.tk_control_frame.grid_columnconfigure(1, weight=0) # Slicer Frame
         self.tk_control_frame.grid_rowconfigure(0, weight=1)
-        self.tk_control_frame.grid_rowconfigure(1, weight=1)
-        self.tk_control_frame.grid_rowconfigure(2, weight=1)
+
+        self.tk_dashboard_frame = ctk.CTkFrame(self.tk_control_frame, corner_radius=0)
+        self.tk_dashboard_frame.grid(row=0, column=0, sticky="nsew")
+        self.tk_slicer_frame = ctk.CTkFrame(self.tk_control_frame, corner_radius=0)
+        self.tk_slicer_frame.grid(row=0, column=1, sticky="nsew")
+
+        self.tk_dashboard_frame.grid_columnconfigure(0, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(1, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(2, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(3, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(4, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(5, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(6, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(7, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(8, weight=1)
+        self.tk_dashboard_frame.grid_columnconfigure(9, weight=1)
+        self.tk_dashboard_frame.grid_rowconfigure(0, weight=1)
+        self.tk_dashboard_frame.grid_rowconfigure(1, weight=1)
+
+        self.tk_slicer_frame.grid_columnconfigure(0, weight=1)
+        self.tk_slicer_frame.grid_columnconfigure(1, weight=1)
+        self.tk_slicer_frame.grid_rowconfigure(0, weight=1)
+        self.tk_slicer_frame.grid_rowconfigure(1, weight=1)
+        self.tk_slicer_frame.grid_rowconfigure(2, weight=1)
 
     def create_widgets(self):
         # File Frame
@@ -108,82 +131,130 @@ class BrainVisualizer(ctk.CTk):
 
         # Image Frame
         self.tk_image_canvas = tk.Canvas(self.tk_image_frame, bg='black')
-        self.tk_image_canvas.pack(fill="both", expand=True)
+        self.tk_image_canvas.grid(row=0, column=0, sticky="nsew")
 
-        # Control Frame
-        self.tk_id_var = tk.StringVar(self.tk_control_frame, value=(str)(self.patient_id))
-        self.tk_id_label = ctk.CTkLabel(self.tk_control_frame, text="ID", fg_color="gray80")
+        # Control Frame / Dashboard
+        self.tk_id_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.patient_id))
+        self.tk_id_label = ctk.CTkLabel(self.tk_dashboard_frame, text="ID", fg_color="gray80")
         self.tk_id_label.grid(row=0, column=0, sticky="nsew")
-        self.tk_id_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_id_var)
+        self.tk_id_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_id_var)
         self.tk_id_container.grid(row=1, column=0, sticky="nsew")
 
-        self.tk_birth_var = tk.StringVar(self.tk_control_frame, value=self.birth_date)
-        self.tk_birth_label = ctk.CTkLabel(self.tk_control_frame, text="Birth Date", fg_color="gray80")
+        self.tk_birth_var = tk.StringVar(self.tk_dashboard_frame, value=self.birth_date)
+        self.tk_birth_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Birth Date", fg_color="gray80")
         self.tk_birth_label.grid(row=0, column=1, sticky="nsew")
-        self.tk_birth_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_birth_var)
+        self.tk_birth_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_birth_var)
         self.tk_birth_container.grid(row=1, column=1, sticky="nsew")
 
-        self.tk_scan_var = tk.StringVar(self.tk_control_frame, value=self.scan_date)
-        self.tk_scan_label = ctk.CTkLabel(self.tk_control_frame, text="Scan Date", fg_color="gray80")
+        self.tk_scan_var = tk.StringVar(self.tk_dashboard_frame, value=self.scan_date)
+        self.tk_scan_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Scan Date", fg_color="gray80")
         self.tk_scan_label.grid(row=0, column=2, sticky="nsew")
-        self.tk_scan_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_scan_var)
+        self.tk_scan_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_scan_var)
         self.tk_scan_container.grid(row=1, column=2, sticky="nsew")
 
-        self.tk_age_var = tk.StringVar(self.tk_control_frame, value=(str)(self.age))
-        self.tk_age_label = ctk.CTkLabel(self.tk_control_frame, text="Age (Days)", fg_color="gray80")
+        self.tk_age_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.age))
+        self.tk_age_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Age (Days)", fg_color="gray80")
         self.tk_age_label.grid(row=0, column=3, sticky="nsew")
-        self.tk_age_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_age_var)
+        self.tk_age_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_age_var)
         self.tk_age_container.grid(row=1, column=3, sticky="nsew")
 
-        self.tk_tbv_var = tk.StringVar(self.tk_control_frame, value=(str)(self.measured_tbv))
-        self.tk_tbv_label = ctk.CTkLabel(self.tk_control_frame, text="TBV", fg_color="gray80")
+        self.tk_tbv_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.measured_tbv))
+        self.tk_tbv_label = ctk.CTkLabel(self.tk_dashboard_frame, text="TBV", fg_color="gray80")
         self.tk_tbv_label.grid(row=0, column=4, sticky="nsew")
-        self.tk_tbv_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_tbv_var)
+        self.tk_tbv_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_tbv_var)
         self.tk_tbv_container.grid(row=1, column=4, sticky="nsew")
 
-        self.tk_axis_var = tk.StringVar(self.tk_control_frame, value=self.axis)
-        self.tk_axis_label = ctk.CTkLabel(self.tk_control_frame, text="Axis", fg_color="gray80")
+        self.tk_axis_var = tk.StringVar(self.tk_dashboard_frame, value=self.axis_list[0])
+        self.tk_axis_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Axis", fg_color="gray80")
         self.tk_axis_label.grid(row=0, column=5, sticky="nsew")
-
-        self.tk_axis_cbox = ctk.CTkComboBox(self.tk_control_frame, values=self.axis_list, command=self.axis_changed, state="readonly", variable=self.tk_axis_var)
+        self.tk_axis_cbox = ctk.CTkOptionMenu(self.tk_dashboard_frame, values=self.axis_list, command=self.axis_changed, variable=self.tk_axis_var)
         self.tk_axis_cbox.grid(row=1, column=5, sticky="nsew", padx=2, pady=2)
 
-        self.tk_current_slice_var = tk.StringVar(self.tk_control_frame, value=(str)(self.current_slice))
-        self.tk_current_slice_label = ctk.CTkLabel(self.tk_control_frame, text="Current Slice", fg_color="gray80")
-        self.tk_current_slice_label.grid(row=0, column=6, sticky="nsew")
-        self.tk_current_slice_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_current_slice_var)
-        self.tk_current_slice_container.grid(row=1, column=6, sticky="nsew")
+        self.tk_zoom_var = tk.StringVar(self.tk_dashboard_frame, value=self.zoom_list[0])
+        self.tk_zoom_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Zoom", fg_color="gray80")
+        self.tk_zoom_label.grid(row=0, column=6, sticky="nsew")
+        self.tk_zoom_cbox = ctk.CTkOptionMenu(self.tk_dashboard_frame, values=self.zoom_list, command=self.zoom_changed, variable=self.tk_zoom_var)
+        self.tk_zoom_cbox.grid(row=1, column=6, sticky="nsew", padx=2, pady=2)
 
-        self.tk_total_slices_var = tk.StringVar(self.tk_control_frame, value=(str)(self.total_slices))
-        self.tk_total_slices_label = ctk.CTkLabel(self.tk_control_frame, text="Total Slices", fg_color="gray80")
-        self.tk_total_slices_label.grid(row=0, column=7, sticky="nsew")
-        self.tk_total_slices_container = ctk.CTkLabel(self.tk_control_frame, textvariable=self.tk_total_slices_var)
-        self.tk_total_slices_container.grid(row=1, column=7, sticky="nsew")
+        self.tk_shape_var = tk.StringVar(self.tk_dashboard_frame, value=self.shape_list[0])
+        self.tk_shape_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Shape", fg_color="gray80")
+        self.tk_shape_label.grid(row=0, column=7, sticky="nsew")
+        self.tk_shape_toggle = ctk.CTkSegmentedButton(self.tk_dashboard_frame, values=self.shape_list, command=self.shape_changed, variable=self.tk_shape_var)
+        self.tk_shape_toggle.grid(row=1, column=7, sticky="nsew")
 
-        self.tk_prev_slice_button = ctk.CTkButton(self.tk_control_frame, text="<", command=self.prev_slice)
-        self.tk_prev_slice_button.grid(row=0, column=8, sticky="nsew", rowspan=2, padx=2, pady=2)
-        self.tk_next_slice_button = ctk.CTkButton(self.tk_control_frame, text=">", command=self.next_slice)
-        self.tk_next_slice_button.grid(row=0, column=9, sticky="nsew", rowspan=2, padx=2, pady=2)
+        self.tk_current_slice_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.current_slice))
+        self.tk_current_slice_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Current Slice", fg_color="gray80")
+        self.tk_current_slice_label.grid(row=0, column=8, sticky="nsew")
+        self.tk_current_slice_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_current_slice_var)
+        self.tk_current_slice_container.grid(row=1, column=8, sticky="nsew", padx=2, pady=2)
+
+        self.tk_total_slices_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.total_slices))
+        self.tk_total_slices_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Total Slices", fg_color="gray80")
+        self.tk_total_slices_label.grid(row=0, column=9, sticky="nsew")
+        self.tk_total_slices_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_total_slices_var)
+        self.tk_total_slices_container.grid(row=1, column=9, sticky="nsew")
+
+        # Control Frame / Slicer
+        self.tk_prev_slice_button = ctk.CTkButton(self.tk_slicer_frame, text="<", command=self.slice_changer(-1))
+        self.tk_prev_slice_button.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        self.tk_next_slice_button = ctk.CTkButton(self.tk_slicer_frame, text=">", command=self.slice_changer(1))
+        self.tk_next_slice_button.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
+
+        self.tk_10prev_slice_button = ctk.CTkButton(self.tk_slicer_frame, text="<<<", command=self.slice_changer(-10))
+        self.tk_10prev_slice_button.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
+        self.tk_10next_slice_button = ctk.CTkButton(self.tk_slicer_frame, text=">>>", command=self.slice_changer(10))
+        self.tk_10next_slice_button.grid(row=1, column=1, sticky="nsew", padx=2, pady=2)
+
+        self.tk_slice_slider_var = tk.DoubleVar(self.tk_slicer_frame, value=self.current_slice)
+        self.tk_slice_slider = ctk.CTkSlider(self.tk_slicer_frame, from_=0, to=1, orientation=tk.HORIZONTAL, command=self.slice_slider_changed, variable=self.tk_slice_slider_var)
+        self.tk_slice_slider.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=2, pady=2)
 
     def axis_changed(self, choice):
         self.axis = choice
 
+        if self.total_slices == 0:
+            return
+
         self.reset_slice_count()
         self.update_slice()
 
-    def next_slice(self):
-        if self.current_slice >= self.total_slices - 1:
+    def zoom_changed(self, choice):
+        self.zoom = self.zoom_list.index(choice)+1
+
+        if self.total_slices == 0:
             return
 
-        self.current_slice += 1
-        self.tk_current_slice_var.set((str)(self.current_slice))
         self.update_slice()
 
-    def prev_slice(self):
-        if self.current_slice <= 0:
+    def shape_changed(self, choice):
+        self.square = choice == "Square"
+
+        if self.total_slices == 0:
             return
 
-        self.current_slice -= 1
+        self.update_slice()
+
+    def slice_changer(self, delta):
+        def change_slice():
+            if self.total_slices == 0:
+                return
+
+            self.current_slice += delta
+
+            if self.current_slice < 0:
+                self.current_slice = 0
+            elif self.current_slice >= self.total_slices:
+                self.current_slice = self.total_slices - 1
+
+            self.tk_current_slice_var.set((str)(self.current_slice))
+            self.update_slice()
+
+        return change_slice
+
+    def slice_slider_changed(self, value):
+        if self.total_slices == 0:
+            return
+        self.current_slice = (int)(value)
         self.tk_current_slice_var.set((str)(self.current_slice))
         self.update_slice()
 
@@ -264,14 +335,26 @@ class BrainVisualizer(ctk.CTk):
     def reset_slice_count(self):
         self.current_slice = 0
         self.total_slices = self.nrrd_data[0].shape[self.axis_list.index(self.axis)]
-        self.tk_total_slices_var.set(self.total_slices)
+
+        self.tk_slice_slider.configure(to=self.total_slices-1)
+        self.tk_slice_slider_var.set(0)
 
     def update_slice(self):
+        self.tk_slice_slider_var.set(self.current_slice)
+
         if self.axis == "X":   self.pixel_array = self.nrrd_data[0][self.current_slice, :, :]
         elif self.axis == "Y": self.pixel_array = self.nrrd_data[0][:, self.current_slice, :]
         elif self.axis == "Z": self.pixel_array = self.nrrd_data[0][:, :, self.current_slice]
 
         img = Image.fromarray(np.uint8(self.pixel_array)).convert('RGB')
+
+        if self.zoom > 1 or self.square:
+            height = self.pixel_array.shape[0]*self.zoom
+            width = self.pixel_array.shape[1]*self.zoom
+
+            if self.square: img = img.resize((height, height), Image.NEAREST)
+            else:           img = img.resize((height, width), Image.NEAREST)
+
         self.current_slice_img = ImageTk.PhotoImage(img)
         self.tk_image_canvas.create_image(self.tk_image_canvas.winfo_width()/2, self.tk_image_canvas.winfo_height()/2, image=self.current_slice_img, anchor=tk.CENTER)
 
