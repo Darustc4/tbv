@@ -7,14 +7,14 @@ import os
 import tkinter as tk
 import customtkinter as ctk
 import nrrd
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("dark-blue")
 
 class BrainVisualizer(ctk.CTk):
     def __init__(self):
-        self.default_nrrd_path = "/home/daru/code/projects/tbv/dataset/01_4146518/2018_04_13_4146518.nrrd"
+        self.default_nrrd_path = "/home/daru/code/projects/tbv/dataset/4146518/2018_04_13_4146518.nrrd"
         self.default_meta_path = "/home/daru/code/projects/tbv/dataset/labels.csv"
 
         self.nrrd_data = None
@@ -168,13 +168,13 @@ class BrainVisualizer(ctk.CTk):
         self.tk_axis_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Axis", fg_color="gray80")
         self.tk_axis_label.grid(row=0, column=5, sticky="nsew")
         self.tk_axis_cbox = ctk.CTkOptionMenu(self.tk_dashboard_frame, values=self.axis_list, command=self.axis_changed, variable=self.tk_axis_var)
-        self.tk_axis_cbox.grid(row=1, column=5, sticky="nsew", padx=2, pady=2)
+        self.tk_axis_cbox.grid(row=1, column=5, sticky="nsew", padx=15, pady=15)
 
         self.tk_zoom_var = tk.StringVar(self.tk_dashboard_frame, value=self.zoom_list[0])
         self.tk_zoom_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Zoom", fg_color="gray80")
         self.tk_zoom_label.grid(row=0, column=6, sticky="nsew")
         self.tk_zoom_cbox = ctk.CTkOptionMenu(self.tk_dashboard_frame, values=self.zoom_list, command=self.zoom_changed, variable=self.tk_zoom_var)
-        self.tk_zoom_cbox.grid(row=1, column=6, sticky="nsew", padx=2, pady=2)
+        self.tk_zoom_cbox.grid(row=1, column=6, sticky="nsew", padx=15, pady=15)
 
         self.tk_shape_var = tk.StringVar(self.tk_dashboard_frame, value=self.shape_list[0])
         self.tk_shape_label = ctk.CTkLabel(self.tk_dashboard_frame, text="Shape", fg_color="gray80")
@@ -337,6 +337,7 @@ class BrainVisualizer(ctk.CTk):
         self.total_slices = self.nrrd_data[0].shape[self.axis_list.index(self.axis)]
 
         self.tk_slice_slider.configure(to=self.total_slices-1)
+        self.tk_current_slice_var.set(0)
         self.tk_slice_slider_var.set(0)
 
     def update_slice(self):
@@ -355,7 +356,7 @@ class BrainVisualizer(ctk.CTk):
             if self.square: img = img.resize((height, height), Image.NEAREST)
             else:           img = img.resize((height, width), Image.NEAREST)
 
-        self.current_slice_img = ImageTk.PhotoImage(img)
+        self.current_slice_img = ImageTk.PhotoImage(ImageOps.expand(img, border=1, fill=(255,0,0)))
         self.tk_image_canvas.create_image(self.tk_image_canvas.winfo_width()/2, self.tk_image_canvas.winfo_height()/2, image=self.current_slice_img, anchor=tk.CENTER)
 
 if __name__ == "__main__":
