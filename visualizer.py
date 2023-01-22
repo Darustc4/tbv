@@ -14,7 +14,8 @@ ctk.set_default_color_theme("dark-blue")
 
 class BrainVisualizer(ctk.CTk):
     def __init__(self):
-        self.default_nrrd_path = "/home/daru/code/projects/tbv/dataset/4146518/2018_04_13_4146518.nrrd"
+        #self.default_nrrd_path = "/home/daru/code/projects/tbv/dataset/4146518/2018_04_13_4146518.nrrd"
+        self.default_nrrd_path = "/home/daru/code/projects/tbv/aug_dataset/aug_4148344_59_326.1_0.nrrd"
         self.default_meta_path = "/home/daru/code/projects/tbv/dataset/labels.csv"
 
         self.nrrd_data = None
@@ -274,11 +275,9 @@ class BrainVisualizer(ctk.CTk):
         try:
             filename, ext = os.path.splitext(os.path.basename(nrrd_path))
             split_filename = filename.split("_")
-            self.patient_id = split_filename[-1]
-            self.scan_date = datetime.datetime(year=(int)(split_filename[0]), month=(int)(split_filename[1]), day=(int)(split_filename[2]))
+
+            is_db_entry = split_filename[0] == "aug"
         except Exception as e:
-            print(e)
-            self.send_message("The NRRD file must be named following the pattern '<year>_<month>_<day>_<id>'.")
             return
 
         if ext != ".nrrd":
@@ -292,28 +291,43 @@ class BrainVisualizer(ctk.CTk):
             return
 
         # Parse metadata
-        try:
-            self.meta_data = pd.read_csv(meta_path)
-        except Exception as e:
-            self.send_message("Metadata file not found or can not be opened.")
-            return
+        if is_db_entry:
+            self.patient_id = split_filename[1]
+            self.age = split_filename[2]
+            self.measured_tbv = split_filename[3]
+            self.scan_date = None
+            string_scan_date = ""
+            self.birth_date = None
+            string_birth_date = ""
+        else:
+            try:
+                self.patient_id = split_filename[-1]
+                self.scan_date = datetime.datetime(year=(int)(split_filename[0]), month=(int)(split_filename[1]), day=(int)(split_filename[2]))
+            except Exception as e:
+                self.send_message("The NRRD file must be named following the pattern '<year>_<month>_<day>_<id>'.")
 
-        if not self.expected_meta_columns.issubset(set(self.meta_data.columns)):
-            self.send_message("The metadata file does not contain the columns 'id', 'birthdate', 'scandate' and 'tbv'.")
-            return
+            try:
+                self.meta_data = pd.read_csv(meta_path)
+            except Exception as e:
+                self.send_message("Metadata file not found or can not be opened.")
+                return
 
-        string_scan_date = self.scan_date.strftime("%d/%m/%Y")              # IMPORTANT: Format the scan date to match the format in the metadata file
-        entry = self.meta_data[(self.meta_data["id"] == (int)(self.patient_id)) & (self.meta_data["scandate"] == string_scan_date)]
+            if not self.expected_meta_columns.issubset(set(self.meta_data.columns)):
+                self.send_message("The metadata file does not contain the columns 'id', 'birthdate', 'scandate' and 'tbv'.")
+                return
 
-        if entry.empty:
-            self.send_message(f"The metadata file does not contain an entry for the patient with id '{self.patient_id}' and scan date '{string_scan_date}'.")
-            return
+            string_scan_date = self.scan_date.strftime("%d/%m/%Y")              # IMPORTANT: Format the scan date to match the format in the metadata file
+            entry = self.meta_data[(self.meta_data["id"] == (int)(self.patient_id)) & (self.meta_data["scandate"] == string_scan_date)]
 
-        entry = entry.iloc[0]
-        string_birth_date = entry["birthdate"]
-        self.birth_date = datetime.datetime.strptime(string_birth_date, "%d/%m/%Y") # Again, format accordingly
-        self.age = (self.scan_date - self.birth_date).days
-        self.measured_tbv = entry["tbv"]
+            if entry.empty:
+                self.send_message(f"The metadata file does not contain an entry for the patient with id '{self.patient_id}' and scan date '{string_scan_date}'.")
+                return
+
+            entry = entry.iloc[0]
+            string_birth_date = entry["birthdate"]
+            self.birth_date = datetime.datetime.strptime(string_birth_date, "%d/%m/%Y") # Again, format accordingly
+            self.age = (self.scan_date - self.birth_date).days
+            self.measured_tbv = entry["tbv"]
 
         # Update the GUI
         self.tk_id_var.set(self.patient_id)

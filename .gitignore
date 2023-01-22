@@ -1,6 +1,7 @@
 # Dataset
 dataset/
 aug_dataset/
+tester.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
