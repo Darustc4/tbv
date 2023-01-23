@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
+import scipy
 import nrrd
 import argparse
 import random
@@ -59,11 +60,7 @@ class Pipeline:
 
         np.random.shuffle(trfs)
 
-        self.pipeline = transforms.Compose([
-            transforms.Resize((target_size, target_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            *trfs
-        ])
-
+        self.pipeline = transforms.Compose(trfs)
         self.fingerprint = tuple(fingerprint)
 
     def __call__(self, img):
@@ -85,7 +82,7 @@ class Pipeline:
             self.size = size
 
         def __call__(self, img):
-            return transforms.functional.resized_crop(img, img.size[0] - self.size, img.size[1] - self.size, self.size, self.size, img.size, interpolation=Image.BICUBIC)
+            return transforms.functional.resized_crop(img, img.size[0] - self.size, img.size[1] - self.size, self.size, self.size, img.size, interpolation=Image.BILINEAR)
 
     class FixedAffine:
         def __init__(self, translate, angle, scale, shear, fill):
@@ -157,7 +154,7 @@ class Augmenter:
             self.age = age
             self.tbv = tbv
 
-    def __init__(self, data_path, labels_path, output_path, target_size, augmentation_factor):
+    def __init__(self, data_path, labels_path, output_path, target_size, augmentation_factor, slice_axis=1, resize_slice_axis=True):
         self.expected_meta_columns = {'id', 'birthdate', 'scandate', 'tbv'}
 
         self.data_path = data_path
@@ -165,6 +162,8 @@ class Augmenter:
         self.output_path = output_path
         self.target_size = target_size
         self.augmentation_factor = augmentation_factor
+        self.slice_axis = slice_axis
+        self.resize_slice_axis = resize_slice_axis
 
         self._setup()
 
@@ -181,8 +180,14 @@ class Augmenter:
 
     def _job(self, datapoint):
         data, header = nrrd.read(datapoint.path)
-        header['sizes'] = np.array([self.target_size, header['sizes'][1], self.target_size]) # New size of the .nrrd file
-        array_shape = data.shape                                                             # Original size of the .nrrd file
+        original_shape = data.shape
+
+        resize_factors = [self.target_size/original_shape[0], self.target_size/original_shape[1], self.target_size/original_shape[2]]
+        if not self.resize_slice_axis: resize_factors[self.slice_axis] = 1
+
+        data = scipy.ndimage.zoom(data, resize_factors)
+        new_shape = data.shape
+        header['sizes'] = data.shape
 
         # Force the first augmentation to be the original image
         augmentation_pipelines = set([Pipeline(self.target_size, force_fingerprint=[False for _ in range(Pipeline.transform_count)])])
@@ -191,14 +196,15 @@ class Augmenter:
 
         # Apply the augmentations to the image
         for id, pipeline in enumerate(augmentation_pipelines):
-            new_data = np.zeros(header['sizes'])
-            for slice in range(array_shape[1]): # Slice on the coronal axis
+            new_data = np.zeros(new_shape)
+            for slice in range(new_shape[self.slice_axis]):
+                if self.slice_axis == 0:    new_data[slice, :, :] = np.array(pipeline(Image.fromarray(data[slice, :, :])))
+                elif self.slice_axis == 1:  new_data[:, slice, :] = np.array(pipeline(Image.fromarray(data[:, slice, :])))
+                else:                       new_data[:, :, slice] = np.array(pipeline(Image.fromarray(data[:, :, slice])))
 
-                pixel_array = data[:, slice, :]
-                pixel_array = np.array(pipeline(Image.fromarray(pixel_array)))
-                new_data[:, slice, :] = pixel_array
-
-            new_path = os.path.join(self.output_path, f"aug_{datapoint.pid}_{datapoint.age}_{datapoint.tbv}_{id}.nrrd")
+            if id == 0: tbv = datapoint.tbv
+            else:       tbv = datapoint.tbv + np.random.uniform(-5., 5.) # Add noise to better simulate real data
+            new_path = os.path.join(self.output_path, f"aug_{datapoint.pid}_{datapoint.age}_{tbv:.2f}_{id}.nrrd")
             nrrd.write(new_path, new_data, header=header)
 
     def _setup(self):
