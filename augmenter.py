@@ -18,7 +18,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class Pipeline:
-    transform_count = 9
+    transform_count = 8
 
     def __init__(self, target_size, force_fingerprint=None):
         trfs = []
@@ -27,7 +27,7 @@ class Pipeline:
         # Crop
         if force_fingerprint is None: fingerprint[0] = random.choice([True, False])
         if fingerprint[0]:
-            trfs.append(Pipeline.FixedCrop(np.random.randint(int(0.85*target_size), target_size)))
+            trfs.append(Pipeline.FixedCrop(np.random.randint(int(0.9*target_size), target_size)))
 
         # Affine
         if force_fingerprint is None: fingerprint[1] = random.choice([True, False])
@@ -44,18 +44,18 @@ class Pipeline:
             trfs.append(Pipeline.FixedFlip(fingerprint[2], fingerprint[3]))
 
         # Noise
-        if force_fingerprint is None: fingerprint[4:7] = np.random.uniform(0., 1., 3) < 0.3
-        if fingerprint[4:7] != [False, False, False]:
-            trfs.append(Pipeline.RandomNoise(*fingerprint[4:7]))
+        if force_fingerprint is None: fingerprint[4:6] = np.random.uniform(0., 1., 3) < 0.2
+        if fingerprint[4:6] != [False, False]:
+            trfs.append(Pipeline.RandomNoise(*fingerprint[4:6]))
 
         # Sharpness
-        if force_fingerprint is None: fingerprint[7] = random.choice([True, False])
-        if fingerprint[7]:
+        if force_fingerprint is None: fingerprint[6] = random.choice([True, False])
+        if fingerprint[6]:
             trfs.append(Pipeline.FixedSharpness(np.random.uniform(0.8, 1.2)))
 
         # Brightness
-        if force_fingerprint is None: fingerprint[8] = random.choice([True, False])
-        if fingerprint[8]:
+        if force_fingerprint is None: fingerprint[7] = random.choice([True, False])
+        if fingerprint[7]:
             trfs.append(Pipeline.FixedBrightness(np.random.uniform(0.7, 1.3)))
 
         np.random.shuffle(trfs)
@@ -120,14 +120,12 @@ class Pipeline:
             return transforms.functional.adjust_sharpness(img, self.sharpness)
 
     class RandomNoise:
-        def __init__(self, sp, gauss, poisson):
+        def __init__(self, sp, gauss):
             self.sp = sp
             self.gauss = gauss
-            self.poisson = poisson
 
-            self.gauss_range = 30
-            self.sp_thresh = 0.01
-            self.poisson_peak = 30
+            self.gauss_range = 20
+            self.sp_thresh = 0.005
 
         def __call__(self, img):
             img = np.array(img)
@@ -137,10 +135,7 @@ class Pipeline:
                 img[noise >= (1-self.sp_thresh)] = np.random.randint(200, 255)
                 img[noise <= self.sp_thresh] = np.random.randint(0, 50)
             if self.gauss:
-                img = img + np.random.randint(-self.gauss_range/2, self.gauss_range/2, (img.shape[0],img.shape[1]))
-                img = np.clip(img, 0, 255)
-            if self.poisson:
-                img = np.random.poisson(img / 255.0 * self.poisson_peak) / self.poisson_peak * 255
+                img = img + np.random.randint(-self.gauss_range/2, self.gauss_range/2, (img.shape[0],img.shape[1]), dtype=np.int8)
                 img = np.clip(img, 0, 255)
 
             return Image.fromarray(np.uint8(img))
@@ -154,16 +149,13 @@ class Augmenter:
             self.age = age
             self.tbv = tbv
 
-    def __init__(self, data_path, labels_path, output_path, target_size, augmentation_factor, slice_axis=1, resize_slice_axis=True):
+    def __init__(self, data_path, output_path, target_size, augmentation_factor):
         self.expected_meta_columns = {'id', 'birthdate', 'scandate', 'tbv'}
 
         self.data_path = data_path
-        self.labels_path = labels_path
         self.output_path = output_path
         self.target_size = target_size
         self.augmentation_factor = augmentation_factor
-        self.slice_axis = slice_axis
-        self.resize_slice_axis = resize_slice_axis
 
         self._setup()
 
@@ -183,27 +175,43 @@ class Augmenter:
         original_shape = data.shape
 
         resize_factors = [self.target_size/original_shape[0], self.target_size/original_shape[1], self.target_size/original_shape[2]]
-        if not self.resize_slice_axis: resize_factors[self.slice_axis] = 1
 
         data = scipy.ndimage.zoom(data, resize_factors)
         new_shape = data.shape
         header['sizes'] = data.shape
 
+        # Each image will be processed by up to 3 pipelines, one for each axis
         # Force the first augmentation to be the original image
-        augmentation_pipelines = set([Pipeline(self.target_size, force_fingerprint=[False for _ in range(Pipeline.transform_count)])])
-        while len(augmentation_pipelines) < self.augmentation_factor:
-            augmentation_pipelines.add(Pipeline(self.target_size))
+        augmentation_pipelines = [(None, None, None)]
+
+        for _ in range(self.augmentation_factor-1):
+            x_pipe = Pipeline(self.target_size) if random.choice([True, False]) else None
+            y_pipe = Pipeline(self.target_size) if random.choice([True, False]) else None
+            z_pipe = Pipeline(self.target_size) if random.choice([True, False]) else None
+
+            if x_pipe is None and y_pipe is None and z_pipe is None:
+                augmentation_pipelines.append([Pipeline(self.target_size), Pipeline(self.target_size), Pipeline(self.target_size)])
+            else:
+                augmentation_pipelines.append([x_pipe, y_pipe, z_pipe])
 
         # Apply the augmentations to the image
-        for id, pipeline in enumerate(augmentation_pipelines):
-            new_data = np.zeros(new_shape)
-            for slice in range(new_shape[self.slice_axis]):
-                if self.slice_axis == 0:    new_data[slice, :, :] = np.array(pipeline(Image.fromarray(data[slice, :, :])))
-                elif self.slice_axis == 1:  new_data[:, slice, :] = np.array(pipeline(Image.fromarray(data[:, slice, :])))
-                else:                       new_data[:, :, slice] = np.array(pipeline(Image.fromarray(data[:, :, slice])))
+        for id, pipelines in enumerate(augmentation_pipelines):
+            new_data = np.copy(data)
+
+            for axis in range(3):
+                pipeline = pipelines[axis]
+
+                if pipeline is None:
+                    continue
+
+                for slice in range(new_shape[axis]):
+                    if axis == 0:    new_data[slice, :, :] = np.array(pipeline(Image.fromarray(new_data[slice, :, :])))
+                    elif axis == 1:  new_data[:, slice, :] = np.array(pipeline(Image.fromarray(new_data[:, slice, :])))
+                    else:            new_data[:, :, slice] = np.array(pipeline(Image.fromarray(new_data[:, :, slice])))
 
             if id == 0: tbv = datapoint.tbv
-            else:       tbv = datapoint.tbv + np.random.uniform(-5., 5.) # Add noise to better simulate real data
+            else:       tbv = datapoint.tbv + np.random.uniform(-2., 2.) # Add a bit of noise to better simulate real data
+
             new_path = os.path.join(self.output_path, f"aug_{datapoint.pid}_{datapoint.age}_{tbv:.2f}_{id}.nrrd")
             nrrd.write(new_path, new_data, header=header)
 
@@ -211,60 +219,33 @@ class Augmenter:
         if not os.path.exists(self.output_path):
             os.makedirs(self.output_path)
 
-        self.labels = self._load_labels()
-        self.data_paths = self._get_data_paths()
         self.dataset = self._generate_dataset()
 
-    def _load_labels(self):
-        try:
-            labels = pd.read_csv(self.labels_path)
-        except Exception as e:
-            raise Exception("CSV labels file not found or can not be opened.")
-
-        if not self.expected_meta_columns.issubset(set(labels.columns)):
-            raise Exception("The metadata file does not contain the columns 'id', 'birthdate', 'scandate' and 'tbv'.")
-
-        return labels
-
-    def _get_data_paths(self):
-        dataset = [os.path.join(dp, f) for dp, dn, filenames in os.walk(self.data_path) for f in filenames if os.path.splitext(f)[1] == '.nrrd']
-
-        return dataset
-
     def _generate_dataset(self):
+        data_paths = [os.path.join(dp, f) for dp, dn, filenames in os.walk(self.data_path) for f in filenames if os.path.splitext(f)[1] == '.nrrd']
+
         dataset = []
-        for data_path in self.data_paths:
+        for data_path in data_paths:
             try:
-                filename, _ = os.path.splitext(os.path.basename(data_path))
+                filename, ext = os.path.splitext(os.path.basename(data_path))
                 split_filename = filename.split("_")
-                pid = split_filename[-1]
-                scan_date = datetime.datetime(year=(int)(split_filename[0]), month=(int)(split_filename[1]), day=(int)(split_filename[2]))
+                patient_id = split_filename[1]
+                age = int(split_filename[2])
+                measured_tbv = float(split_filename[3])
+                dataset.append(Augmenter.Datapoint(data_path, patient_id, age, measured_tbv))
             except Exception as e:
-                raise Exception("The NRRD file must be named following the pattern '<year>_<month>_<day>_<id>'.")
-
-            string_scan_date = scan_date.strftime("%d/%m/%Y")              # IMPORTANT: Format the scan date to match the format in the metadata file
-            entry = self.labels[(self.labels["id"] == (int)(pid)) & (self.labels["scandate"] == string_scan_date)]
-
-            if entry.empty:
-                raise Exception(f"The metadata file does not contain an entry for the patient with id '{pid}' and scan date '{string_scan_date}'.")
-
-            entry = entry.iloc[0]
-            string_birth_date = entry["birthdate"]
-            birth_date = datetime.datetime.strptime(string_birth_date, "%d/%m/%Y") # Again, format accordingly
-            age = (scan_date - birth_date).days
-            tbv = entry["tbv"]
-
-            dataset.append(Augmenter.Datapoint(data_path, pid, age, tbv))
+                print(f"Could not parse filename {filename}. Skipping file.")
+                continue
 
         return dataset
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('size', type=int, help="Size of the output raster image. (128 is recommended)")
     parser.add_argument('factor', type=int, help="Number of augmented raster images per original raster image")
 
-    parser.add_argument('--data', type=str, default='dataset')
-    parser.add_argument('--labels', type=str, default='dataset/labels.csv')
-    parser.add_argument('--output', type=str, default='aug_dataset')
+    parser.add_argument('-d', '--data', type=str, default='dataset')
+    parser.add_argument('-o', '--output', type=str, default='aug_dataset')
     args = parser.parse_args()
 
     if args.size <= 0 or args.factor <= 0:
@@ -273,5 +254,5 @@ if __name__ == '__main__':
     if args.factor > 50:
         raise Exception("The maximum factor is 50.")
 
-    augmenter = Augmenter(args.data, args.labels, args.output, args.size, args.factor)
+    augmenter = Augmenter(args.data, args.output, args.size, args.factor)
     augmenter.augment()
