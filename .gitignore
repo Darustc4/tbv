@@ -2,6 +2,8 @@
 dataset/
 aug_dataset/
 tester.ipynb
+models/last_run_weights.pt
+models/test.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
