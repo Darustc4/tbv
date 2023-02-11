@@ -14,8 +14,7 @@ ctk.set_default_color_theme("dark-blue")
 
 class BrainVisualizer(ctk.CTk):
     def __init__(self):
-        #self.default_path = "/home/daru/code/projects/tbv/dataset/base_4146527_27_236.15.nrrd"
-        self.default_path = "/home/daru/code/projects/tbv/aug_dataset/aug_4149719_2_183.27_2.nrrd"
+        self.default_path = "/home/daru/code/tbv/dataset/1_01-03-2018.nrrd"
 
         self.nrrd_data = None
 
@@ -33,7 +32,7 @@ class BrainVisualizer(ctk.CTk):
 
         self.age = 0
         self.patient_id = 0
-        self.measured_tbv = 0
+        self.tbv = 0
 
         self.create_tk()
 
@@ -132,7 +131,7 @@ class BrainVisualizer(ctk.CTk):
         self.tk_age_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_age_var)
         self.tk_age_container.grid(row=1, column=1, sticky="nsew")
 
-        self.tk_tbv_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.measured_tbv))
+        self.tk_tbv_var = tk.StringVar(self.tk_dashboard_frame, value=(str)(self.tbv))
         self.tk_tbv_label = ctk.CTkLabel(self.tk_dashboard_frame, text="TBV", fg_color="gray80")
         self.tk_tbv_label.grid(row=0, column=2, sticky="nsew")
         self.tk_tbv_container = ctk.CTkLabel(self.tk_dashboard_frame, textvariable=self.tk_tbv_var)
@@ -242,7 +241,7 @@ class BrainVisualizer(ctk.CTk):
         # Parse NRRD filename to obtain patient ID and scan date
         try:
             filename, ext = os.path.splitext(os.path.basename(nrrd_path))
-            split_filename = filename.split("_")
+            self.patient_id = filename.split("_")[0]
         except Exception as e:
             return
 
@@ -251,23 +250,21 @@ class BrainVisualizer(ctk.CTk):
             return
 
         try:
-            self.nrrd_data = nrrd.read(nrrd_path)
+            self.nrrd_data, headers = nrrd.read(nrrd_path)
         except Exception as e:
             self.send_message("NRRD file not found or can not be opened.")
             return
 
-        # Parse metadata from filename
         try:
-            self.patient_id = split_filename[1]
-            self.age = split_filename[2]
-            self.measured_tbv = split_filename[3]
+            self.age = headers['age_days']
+            self.tbv = headers['tbv']
         except Exception as e:
-            self.send_message("The NRRD file must be named following the pattern 'base_<id>_<age>_<tbv>' or 'aug_<id>_<age>_<tbv>_<id>'.")
+            self.send_message("The NRRD file must contain the headers 'age' and 'tbv'.")
 
         # Update the GUI
         self.tk_id_var.set(self.patient_id)
         self.tk_age_var.set(self.age)
-        self.tk_tbv_var.set(self.measured_tbv)
+        self.tk_tbv_var.set(self.tbv)
         self.tk_total_slices_var.set(self.total_slices)
 
         self.reset_slice_count()
@@ -281,7 +278,7 @@ class BrainVisualizer(ctk.CTk):
 
     def reset_slice_count(self):
         self.current_slice = 0
-        self.total_slices = self.nrrd_data[0].shape[self.axis_list.index(self.axis)]
+        self.total_slices = self.nrrd_data.shape[self.axis_list.index(self.axis)]
 
         self.tk_slice_slider.configure(to=self.total_slices-1)
         self.tk_current_slice_var.set(0)
@@ -290,9 +287,9 @@ class BrainVisualizer(ctk.CTk):
     def update_slice(self):
         self.tk_slice_slider_var.set(self.current_slice)
 
-        if self.axis == "X":   self.pixel_array = self.nrrd_data[0][self.current_slice, :, :]
-        elif self.axis == "Y": self.pixel_array = self.nrrd_data[0][:, self.current_slice, :]
-        elif self.axis == "Z": self.pixel_array = self.nrrd_data[0][:, :, self.current_slice]
+        if self.axis == "X":   self.pixel_array = self.nrrd_data[self.current_slice, :, :]
+        elif self.axis == "Y": self.pixel_array = self.nrrd_data[:, self.current_slice, :]
+        elif self.axis == "Z": self.pixel_array = self.nrrd_data[:, :, self.current_slice]
 
         img = Image.fromarray(np.uint8(self.pixel_array)).convert('RGB')
 
