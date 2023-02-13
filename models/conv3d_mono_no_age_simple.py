@@ -7,47 +7,43 @@ from shared import *
 
 cuda = torch.device('cuda')
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, stride=1, downsample=None):
-        super(ResidualBlock, self).__init__()
-        self.conv0 = nn.Sequential(
-            nn.Conv3d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1),
-            nn.BatchNorm3d(out_ch),
-            nn.ReLU()
-        )
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(out_ch, out_ch, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(out_ch)
-        )
-        self.downsample = downsample
-        self.relu = nn.ReLU()
-        self.out_ch = out_ch
-        
-    def forward(self, x):
-        residual = x
-        out = self.conv0(x)
-        out = self.conv1(out)
-        if self.downsample:
-            residual = self.downsample(x)
-        out += residual
-        out = self.relu(out)
-        return out
-
 class RasterNet(nn.Module):
-    def __init__(self, block, layers):
+    def __init__(self):
         super(RasterNet, self).__init__()
-        self.inplanes = 64
 
-        self.conv0 = nn.Sequential( # 1x96x96x96 -> 64x48x48x48
-            nn.Conv3d(1, 64, kernel_size=7, stride=2, padding=3),
-            nn.BatchNorm3d(64),
+        self.conv0 = nn.Sequential( # 1x96x96x96 -> 32x48x48x48
+            nn.Conv3d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm3d(32),
             nn.ReLU()
         )
 
-        self.layer0 = self._make_layer(block, 64, layers[0], stride=2)
-        self.layer1 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer2 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer3 = self._make_layer(block, 512, layers[3], stride=2)
+        self.conv1 = nn.Sequential( # 32x48x48x48 -> 64x24x24x24
+            nn.Conv3d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm3d(64),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2)
+        )
+
+        self.conv2 = nn.Sequential( # 64x24x24x24 -> 128x12x12x12
+            nn.Conv3d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm3d(128),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2)
+        )
+
+        self.conv3 = nn.Sequential( # 128x12x12x12 -> 256x6x6x6
+            nn.Conv3d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm3d(256),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2)
+        )
+
+        self.conv4 = nn.Sequential( # 256x6x6x6 -> 512x3x3x3
+            nn.Conv3d(256, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm3d(512),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2)
+        )
 
         self.fc = nn.Sequential(
             nn.Flatten(),
@@ -61,30 +57,13 @@ class RasterNet(nn.Module):
             nn.Linear(512, 1)
         )
     
-    def _make_layer(self, block, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes:
-            downsample = nn.Sequential(
-                nn.Conv3d(self.inplanes, planes, kernel_size=1, stride=stride),
-                nn.BatchNorm3d(planes),
-            )
-        layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
-        self.inplanes = planes
-        for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
-
-        return nn.Sequential(*layers)
-
     def forward(self, x):
-        x = x.to(cuda)
         x = self.conv0(x)
-        x = self.layer0(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
         x = self.fc(x)
-
         return x
 
     def count_parameters(model):
@@ -92,7 +71,7 @@ class RasterNet(nn.Module):
 
 if __name__ == "__main__":
     dataset = RasterDataset(data_dir="../dataset")
-    model = RasterNet(ResidualBlock, [3, 3, 3, 3]).to(cuda)
+    model = RasterNet().to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 

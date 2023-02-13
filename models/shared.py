@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import os
+import gc
 import nrrd
 import torch
 import torch.nn as nn
@@ -59,7 +60,10 @@ class RasterDataset(Dataset):
             tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
             tio.transforms.RandomNoise(mean=0, std=0.1, p=0.3),
             tio.transforms.RandomBlur(std=0.1, p=0.3),
-            tio.transforms.RandomBiasField(coefficients=0.5, order=3, p=0.3)
+            tio.transforms.RandomBiasField(coefficients=0.5, order=3, p=0.3),
+            tio.transforms.RandomMotion(degrees=10, translation=10, num_transforms=3, p=0.2),
+            tio.transforms.RandomGhosting(p=0.2),
+            tio.transforms.RandomSwap(p=0.2)
         ])
 
     def __len__(self):
@@ -114,7 +118,10 @@ class EarlyStopper:
             if model: self.save_checkpoint(val_loss, model)
         elif score < self.best_score + self.delta:
             self.counter += 1
-            self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+
+            if self.verbose:
+                self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
@@ -131,7 +138,7 @@ class EarlyStopper:
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
 
-def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print):
+def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
     train_loss_list = pd.Series(dtype=np.float32)
     val_loss_list = pd.Series(dtype=np.float32)
 
@@ -149,12 +156,16 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
             loss = criterion(predictions, voxels)
 
             loss.backward()
-            optimizer.step()
+            if(scheduler):  scheduler.step(loss)
+            else:           optimizer.step()
 
             training_loss += loss.item()
 
-            if (i+1) % 10 == 0:
-                trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}              ", end="\r")
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            if (i+1) % 5 == 0:
+                trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
 
         validation_loss = 0.
         model.eval()
@@ -173,8 +184,9 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
         train_loss_list.at[epoch] = train_loss
         val_loss_list.at[epoch] = val_loss
 
-        trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}               ")
-        if early_stopper(validation_loss, model):
+        stopping = early_stopper(validation_loss, model)
+        trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        if stopping:
             break
     
     return train_loss_list, val_loss_list
@@ -204,7 +216,7 @@ def get_unscaled_loss(model, dataloader, dataset):
 
     return avg_diff, std_diff
 
-def cross_validator(model, dataset, device, k_fold=5, num_epochs=400, patience=30, optimizer_class=torch.optim.Adam, criterion_class=nn.MSELoss, learning_rate=0.001, weight_decay = 0.00001, batch_size=32, data_workers=4, verbose=False, trace_func=print, fold_limit=None):
+def cross_validator(model, dataset, device, optimizer_class, criterion_class, optimizer_params={}, criterion_params={}, k_fold=5, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, fold_limit=None, scheduler_class=None, scheduler_params={}):
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
 
@@ -227,9 +239,11 @@ def cross_validator(model, dataset, device, k_fold=5, num_epochs=400, patience=3
 
         model.load_state_dict(torch.load("base_weights.pt"))
 
-        criterion = criterion_class()
-        optimizer = optimizer_class(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        early_stopper = EarlyStopper(patience=patience, verbose=verbose, path="best_weights.pt", trace_func=trace_func)
+        criterion = criterion_class(**criterion_params)
+        optimizer = optimizer_class(model.parameters(), **optimizer_params)
+        scheduler = None if not scheduler_class else scheduler_class(optimizer, **scheduler_params)
+        
+        early_stopper = EarlyStopper(patience=patience, verbose=False, path="best_weights.pt", trace_func=trace_func)
 
         trll = 0
         trlr = i * seg
@@ -247,17 +261,17 @@ def cross_validator(model, dataset, device, k_fold=5, num_epochs=400, patience=3
         train_indices = dataset.get_indices_from_pids(unique_pids[train_indices])
         val_indices = dataset.get_indices_from_pids(unique_pids[val_indices])
 
-        print(f"Train volumes: {len(train_indices)}")
-        print(f"Validation volumes: {len(val_indices)}")
+        trace_func(f"Train volumes: {len(train_indices)}")
+        trace_func(f"Validation volumes: {len(val_indices)}")
 
         train_set = torch.utils.data.dataset.Subset(dataset, train_indices)
         val_set = torch.utils.data.dataset.Subset(dataset, val_indices)
         val_set.validation = True
 
-        train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True)
-        test_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True)
+        train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
+        test_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
         
-        train_loss_list, val_loss_list = train(model, criterion, optimizer, train_dataloader, test_dataloader, early_stopper, num_epochs, device, trace_func)
+        train_loss_list, val_loss_list = train(model, criterion, optimizer, train_dataloader, test_dataloader, early_stopper, num_epochs, device, trace_func, scheduler=scheduler)
         
         model.load_state_dict(torch.load("best_weights.pt"))
 
