@@ -49,10 +49,6 @@ scipy==1.10.0
 six==1.16.0
 stack-data==0.6.2
 threadpoolctl==3.1.0
-torch==1.13.1+rocm5.2
-torch-directml==0.1.13.1.dev230119
-torchaudio==0.13.1+rocm5.2
-torchvision==0.14.1+rocm5.2
 tornado==6.2
 tqdm==4.64.1
 traitlets==5.9.0
