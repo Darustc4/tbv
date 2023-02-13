@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from shared import *
@@ -54,13 +55,11 @@ class RasterNet(nn.Module):
             nn.ReLU()
         )
 
-        self.linear = nn.Sequential( 
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
+        self.fc0 = nn.Linear(1024, 1024)
+        self.fc1 = nn.Linear(1024, 512)
+        self.fc2 = nn.Linear(512, 1)
+        
+        self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
         x = x.to(cuda)
@@ -72,7 +71,12 @@ class RasterNet(nn.Module):
         x = self.conv5(x)
 
         x = x.view(x.size(0), -1)
-        x = self.linear(x)
+        x = self.dropout(x)
+        x = F.relu(self.fc0(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
 
         return x
 
@@ -81,30 +85,30 @@ if __name__ == "__main__":
     model = RasterNet().to(cuda)
 
     tr_score, val_score, unscaled_loss = cross_validator(
-        model, dataset, cuda, k_fold=6, num_epochs=1000, patience=50, 
+        model, dataset, cuda, k_fold=6, num_epochs=2000, patience=200, 
         optimizer_class=torch.optim.Adam, criterion_class=nn.MSELoss, 
         learning_rate=0.0001, weight_decay=0.00001, batch_size=4, data_workers=4,
-        verbose=True, trace_func=print, fold_limit=None
+        verbose=True, trace_func=print, fold_limit=1
     )
-    """
+    
     # first fold training and validation loss plot
-    plt.plot(tr_score[0], label="Training Loss", linewidth=1.5)
-    plt.plot(val_score[0], label="Validation Loss", linewidth=1.5)
+    plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
+    plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
     plt.xlabel("Epochs")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_no_age_train.png")
+    plt.savefig("plots/conv3d_mono_no_age_single_train.png")
 
-
-    print("Average Loss: ", unscaled_loss[0][0])
-    print("Standard Deviation: ", unscaled_loss[0][1])
+    print("\nResults:")
+    print(f"Average Loss: {unscaled_loss[0][0]} cc")
+    print(f"Standard Deviation: {unscaled_loss[0][1]} cc")
 
     """
     figure, axis = plt.subplots(3, 2)
     for i in range(3):
         for j in range(2):
-            axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=1.5)
-            axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=1.5)
+            axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=1.0)
+            axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=1.0)
             axis[i][j].set_xlabel("Epochs")
             axis[i][j].set_ylabel("Loss")
 
@@ -124,4 +128,4 @@ if __name__ == "__main__":
     plt.xlabel("Fold")
     plt.ylabel("TBV Loss")
     plt.savefig("plots/conv3d_mono_no_age_loss.png")
-    
+    """

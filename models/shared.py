@@ -179,28 +179,28 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
     
     return train_loss_list, val_loss_list
 
-def get_unscaled_loss(model, criterion, dataloader, dataset):
+def get_unscaled_loss(model, dataloader, dataset):
     all_diffs = []
-    for i, data in enumerate(dataloader):
-        rasters = data["raster"].float()
-        voxels = data["voxels"].float()
+    model.eval()
+    with torch.no_grad():
+        for _, data in enumerate(dataloader):
+            rasters = data["raster"].float()
+            tbvs = data["tbv"].float().numpy().reshape(-1, 1)
 
-        predictions = model(rasters).squeeze().cpu()
-        predictions = predictions.detach().numpy().reshape(-1, 1)
-        voxels = voxels.detach().numpy().reshape(-1, 1)
-        
-        # Revert the normalization and standardization
-        predictions = dataset.voxels_std.inverse_transform(predictions)
-        predictions = dataset.voxels_minmax.inverse_transform(predictions)
-        predicted_tbvs = voxels * data["voxel_volume"].numpy().reshape(-1, 1)
-        tbvs = data["tbv"].numpy().reshape(-1, 1)
+            predictions = model(rasters).squeeze().cpu()
+            predictions = predictions.detach().numpy().reshape(-1, 1)
+            
+            # Revert the normalization and standardization
+            predictions = dataset.voxels_std.inverse_transform(predictions)
+            predictions = dataset.voxels_minmax.inverse_transform(predictions)
+            predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
-        all_diffs.append(np.abs(predicted_tbvs - tbvs))
+            all_diffs.append(np.abs(predicted_tbvs - tbvs))
 
     all_diffs = np.concatenate(all_diffs)
     
-    avg_diff = np.mean(all_diffs)
-    std_diff = np.std(all_diffs)
+    avg_diff = round(np.mean(all_diffs), 2)
+    std_diff = round(np.std(all_diffs), 2)
 
     return avg_diff, std_diff
 
@@ -263,9 +263,8 @@ def cross_validator(model, dataset, device, k_fold=5, num_epochs=400, patience=3
 
         train_score.at[i] = train_loss_list
         val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = get_unscaled_loss(model, criterion, test_dataloader, dataset)
+        unscaled_loss.at[i] = get_unscaled_loss(model, test_dataloader, dataset)
     
     os.remove("base_weights.pt")
-    os.remove("best_weights.pt")
     
     return train_score, val_score, unscaled_loss
