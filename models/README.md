@@ -1,81 +1,71 @@
 # Models
 
----
-## Triplanar First No Age
-
-Single triplanar layer first followed by 2D convolutions and linear perceptron. Age of the patient is not used.
-
-#### Architecture 0
-
-250 epochs. Validation patience of 20 epochs. No dropout.
-Batch size 32. Data workers 4.
-
-Criterion: MSE Loss
-Optimizer: Adam. No decay. LR 0.0001.
-
-Full execution: 8 Hours
-
-##### 6-Fold cross validation training results
-
-![](./plots/triplanar_first_no_age_train_0.png)
-
-
-##### Absolute TBV loss for each fold
-
-TBV Loss | Mean      | STD
--------- | --------- | ---------
-0        | 48.554874 | 40.716999
-1        | 39.541374 | 29.643322
-2        | 32.900814 | 23.452045
-3        | 30.841763 | 36.390327
-4        | 29.869825 | 24.725018
-5        | 39.944389 | 49.158382
-
-![](./plots/triplanar_first_no_age_tbv_0.png)
-
-##### Comments
-- Model is not learning from the training set. No real convergence happening.
-- Absolute loss is too high and variable. Not usable.
-
-#### Architecture 1
-
+Validating on: ['23', '48', '38', '1', '80', '22', '27', '36']
 
 ---
+## 3D Convolution No Age
 
-## Full 2D No Age
+3D convolutions and linear perceptron. Age of the patient is not used.
 
-All 2D convolutions for coronal view and linear perceptron. Age of the patient is not used.
+```
+tio.transforms.RandomAffine(scales=0, degrees=10, translation=0.2, default_pad_value='minimum', p=0.25),
+tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.25),
+tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.25),
+tio.transforms.RandomNoise(mean=0, std=0.1, p=0.25),
+tio.transforms.RandomBlur(std=0.1, p=0.25)
+```
 
-#### Architecture 0
+### No Residual
 
-250 epochs. Validation patience of 20 epochs. No dropout.
-Batch size 32. Data workers 4.
+Model has 19396225 trainable parameters
+
+2000 epochs. Validation patience of 250 epochs. Batch size 8.
 
 Criterion: MSE Loss
-Optimizer: Adam. No decay. LR 0.0001.
+Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
 
-Full execution: 7.5 Hours
+Results:
+Average Loss: 13.39 cc
+Standard Deviation: 13.15 cc
 
-##### 6-Fold cross validation training results
+![](plots/conv3d_mono_no_age_nores.png)
 
-![](./plots/full_2d_no_age_train_0.png)
+### ResNet [3, 3, 3, 3]
+
+Model has 66657601 trainable parameters.
+
+2000 epochs. Validation patience of 250 epochs. Batch size 8.
+
+Criterion: MSE Loss
+Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
 
 
-##### Absolute TBV loss for each fold
+---
+## 3D Convolution Age
 
-TBV Loss | Mean      | STD
--------- | --------- | ---------
-0        | 43.358246 | 36.209705
-1        | 33.782776 | 26.561201
-2        | 31.151865 | 21.578844
-3        | 32.257938 | 34.001205
-4        | 26.637047 | 22.976866
-5        | 36.270725 | 41.414104
+### No Residual
 
-![](./plots/full_2d_no_age_tbv_0.png)
+Model has 19396738 trainable parameters.
 
-##### Comments
-- Model is not learning from the training set. No real convergence happening.
-- Absolute loss is too high and variable. Not usable.
+2000 epochs. Validation patience of 250 epochs. Batch size 8.
+
+Criterion: MSE Loss
+Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
+
+
+### ResNet [3, 3, 3, 3]
+
+Model has 66658114 trainable parameters.
+
+2000 epochs. Validation patience of 250 epochs. Batch size 8.
+
+Criterion: MSE Loss
+Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
+
+
 
 ---

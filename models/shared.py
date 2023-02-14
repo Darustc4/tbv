@@ -33,7 +33,7 @@ class RasterDataset(Dataset):
             tensor = znorm_transform(tensor)
 
             data.append({
-                "pid": os.path.splitext(file)[0].split("_")[1],
+                "pid": os.path.splitext(file)[0].split("_")[0],
                 "age": headers["age_days"],
                 "tbv": headers["tbv"],
                 "voxels": headers["tbv_n_voxels"],
@@ -55,15 +55,11 @@ class RasterDataset(Dataset):
         self.dataset[["voxels"]] = self.voxels_std.fit_transform(self.dataset[["voxels"]])
 
         self.transform = tio.Compose([
-            tio.transforms.RandomAffine(scales=0, degrees=180, translation=0.3, default_pad_value='minimum', p=0.8),
-            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.5),
-            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
-            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.3),
-            tio.transforms.RandomBlur(std=0.1, p=0.3),
-            tio.transforms.RandomBiasField(coefficients=0.5, order=3, p=0.3),
-            tio.transforms.RandomMotion(degrees=10, translation=10, num_transforms=3, p=0.2),
-            tio.transforms.RandomGhosting(p=0.2),
-            tio.transforms.RandomSwap(p=0.2)
+            tio.transforms.RandomAffine(scales=0, degrees=10, translation=0.2, default_pad_value='minimum', p=0.25),
+            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.25),
+            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.25),
+            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.25),
+            tio.transforms.RandomBlur(std=0.1, p=0.25)
         ])
 
     def __len__(self):
@@ -138,7 +134,67 @@ class EarlyStopper:
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
 
-def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
+def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
+    train_loss_list = pd.Series(dtype=np.float32)
+    val_loss_list = pd.Series(dtype=np.float32)
+
+    for epoch in range(num_epochs):
+        training_loss = 0.
+        
+        model.train()
+        for i, data in enumerate(tr_dataloader):
+            rasters = data["raster"].float().to(device)
+            voxels = data["voxels"].float().to(device)
+            ages = data["age"].float().to(device)
+
+            ground = torch.dstack((voxels, ages)).squeeze()
+
+            optimizer.zero_grad()
+
+            # split the predictions into predicted voxels and ages
+            predictions = model(rasters).squeeze()
+            loss = criterion(predictions, ground)
+
+            loss.backward()
+            optimizer.step()
+
+            training_loss += loss.item()
+
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            if (i+1) % 5 == 0:
+                trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
+
+        validation_loss = 0.
+        model.eval()
+        with torch.no_grad():
+            for i, data in enumerate(val_dataloader):
+                rasters = data["raster"].float().to(device)
+                voxels = data["voxels"].float().to(device)
+                ages = data["age"].float().to(device)
+
+                ground = torch.dstack((voxels, ages)).squeeze()
+                predictions = model(rasters).squeeze()
+                loss = criterion(predictions, ground)
+
+                validation_loss += loss.item()
+
+        train_loss = training_loss/len(tr_dataloader)
+        val_loss = validation_loss/len(val_dataloader)
+        train_loss_list.at[epoch] = train_loss
+        val_loss_list.at[epoch] = val_loss
+
+        if(scheduler):  scheduler.step(train_loss)
+
+        stopping = early_stopper(validation_loss, model)
+        trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        if stopping:
+            break
+    
+    return train_loss_list, val_loss_list
+
+def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
     train_loss_list = pd.Series(dtype=np.float32)
     val_loss_list = pd.Series(dtype=np.float32)
 
@@ -156,8 +212,7 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
             loss = criterion(predictions, voxels)
 
             loss.backward()
-            if(scheduler):  scheduler.step(loss)
-            else:           optimizer.step()
+            optimizer.step()
 
             training_loss += loss.item()
 
@@ -184,6 +239,8 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
         train_loss_list.at[epoch] = train_loss
         val_loss_list.at[epoch] = val_loss
 
+        if(scheduler):  scheduler.step(train_loss)
+
         stopping = early_stopper(validation_loss, model)
         trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
         if stopping:
@@ -191,12 +248,16 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
     
     return train_loss_list, val_loss_list
 
-def get_unscaled_loss(model, dataloader, dataset):
+def final_eval_tbv(model, dataloader, dataset, device, trace_func=print, verbose=False):
     all_diffs = []
     model.eval()
+
+    if(verbose):
+        trace_func("\nEvaluating model on test set...")
+
     with torch.no_grad():
-        for _, data in enumerate(dataloader):
-            rasters = data["raster"].float()
+        for i, data in enumerate(dataloader):
+            rasters = data["raster"].float().to(device)
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
 
             predictions = model(rasters).squeeze().cpu()
@@ -207,16 +268,79 @@ def get_unscaled_loss(model, dataloader, dataset):
             predictions = dataset.voxels_minmax.inverse_transform(predictions)
             predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
-            all_diffs.append(np.abs(predicted_tbvs - tbvs))
+            tbv_diffs = np.abs(predicted_tbvs - tbvs)
+            all_diffs.append(tbv_diffs)
+
+            if(verbose and i < 5):
+                for j in range(len(tbvs)):
+                    trace_func(f"Predicted TBV: {predicted_tbvs[j][0]:.2f}\tActual TBV: {tbvs[j][0]:.2f}\tDifference: {tbv_diffs[j][0]:.2f}")
 
     all_diffs = np.concatenate(all_diffs)
     
     avg_diff = round(np.mean(all_diffs), 2)
     std_diff = round(np.std(all_diffs), 2)
 
+    if(verbose):
+        trace_func()
+        trace_func(f"Average difference: {avg_diff} cc.\tStandard deviation: {std_diff} cc.")
+
     return avg_diff, std_diff
 
-def cross_validator(model, dataset, device, optimizer_class, criterion_class, optimizer_params={}, criterion_params={}, k_fold=5, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, fold_limit=None, scheduler_class=None, scheduler_params={}):
+
+def final_eval_tbv_age(model, dataloader, dataset, device, trace_func=print, verbose=False):
+    all_diffs_tbv = []
+    all_diffs_age = []
+    model.eval()
+
+    if(verbose):
+        trace_func("\nEvaluating model on test set...")
+
+    with torch.no_grad():
+        for i, data in enumerate(dataloader):
+            rasters = data["raster"].float().to(device)
+            tbvs = data["tbv"].float().numpy().reshape(-1, 1)
+            ages = data["age"].float().numpy().reshape(-1, 1)
+
+            predictions = model(rasters).squeeze().cpu()
+            pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
+            pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
+            pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
+            
+            # Revert the normalization and standardization
+            pred_voxels = dataset.voxels_std.inverse_transform(pred_voxels)
+            pred_voxels = dataset.voxels_minmax.inverse_transform(pred_voxels)
+            pred_ages = dataset.age_std.inverse_transform(pred_ages)
+            pred_ages = dataset.age_minmax.inverse_transform(pred_ages)
+
+            pred_tbvs = pred_voxels * data["voxel_volume"].numpy().reshape(-1, 1)
+
+            tbv_diffs = np.abs(pred_tbvs - tbvs)
+            age_diffs = np.abs(pred_ages - ages)
+
+            all_diffs_tbv.append(tbv_diffs)
+            all_diffs_age.append(age_diffs)
+
+            if(verbose and i < 5):
+                for j in range(len(tbvs)):
+                    trace_func(f"Predicted TBV: {pred_tbvs[j][0]:.2f}\tActual TBV: {tbvs[j][0]:.2f}\tDifference: {tbv_diffs[j][0]:.2f}")
+                    trace_func(f"Predicted Age: {pred_ages[j][0]:.2f}\tActual Age: {ages[j][0]:.2f}\tDifference: {age_diffs[j][0]:.2f}")
+
+    all_diffs_tbv = np.concatenate(all_diffs_tbv)
+    all_diffs_age = np.concatenate(all_diffs_age)
+    
+    avg_diff_tbv = round(np.mean(all_diffs_tbv), 2)
+    std_diff_tbv = round(np.std(all_diffs_tbv), 2)
+    avg_diff_age = round(np.mean(all_diffs_age), 2)
+    std_diff_age = round(np.std(all_diffs_age), 2)
+
+    if(verbose):
+        trace_func()
+        trace_func(f"Average difference TBV: {avg_diff_tbv} cc.\tStandard deviation TBV: {std_diff_tbv} cc.")
+        trace_func(f"Average difference Age: {avg_diff_age} days.\tStandard deviation Age: {std_diff_age} days.")
+
+    return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
+
+def run(model, dataset, device, optimizer_class, criterion_class, train_fun, final_eval_fun, optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, override_val_pids=None):
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
 
@@ -232,9 +356,6 @@ def cross_validator(model, dataset, device, optimizer_class, criterion_class, op
     # tr:train, val:valid; r:right,l:left;  eg: trrr: right index of right side train subset 
     # index: [trll,trlr],[vall,valr],[trrl,trrr]
     for i in range(k_fold):
-        if fold_limit is not None and i >= fold_limit:
-            break
-
         trace_func(f"Fold {i+1}/{k_fold}")
 
         model.load_state_dict(torch.load("base_weights.pt"))
@@ -242,28 +363,31 @@ def cross_validator(model, dataset, device, optimizer_class, criterion_class, op
         criterion = criterion_class(**criterion_params)
         optimizer = optimizer_class(model.parameters(), **optimizer_params)
         scheduler = None if not scheduler_class else scheduler_class(optimizer, **scheduler_params)
-        
         early_stopper = EarlyStopper(patience=patience, verbose=False, path="best_weights.pt", trace_func=trace_func)
 
-        trll = 0
-        trlr = i * seg
-        vall = trlr
-        valr = i * seg + seg
-        trrl = valr
-        trrr = total_pids
-        
-        train_left_indices = list(range(trll,trlr))
-        train_right_indices = list(range(trrl,trrr))
-        
-        train_indices = train_left_indices + train_right_indices
-        val_indices = list(range(vall,valr))
+        if override_val_pids:
+            val_indices = dataset.get_indices_from_pids(override_val_pids)
+            train_indices = list(set(range(len(dataset))) - set(val_indices))
+        else:
+            trll = 0
+            trlr = i * seg
+            vall = trlr
+            valr = i * seg + seg
+            trrl = valr
+            trrr = total_pids
+            
+            train_left_indices = list(range(trll,trlr))
+            train_right_indices = list(range(trrl,trrr))
+            
+            train_indices = train_left_indices + train_right_indices
+            val_indices = list(range(vall,valr))
 
-        train_indices = dataset.get_indices_from_pids(unique_pids[train_indices])
-        val_indices = dataset.get_indices_from_pids(unique_pids[val_indices])
+            train_indices = dataset.get_indices_from_pids(unique_pids[train_indices])
+            val_indices = dataset.get_indices_from_pids(unique_pids[val_indices])
 
         trace_func(f"Train volumes: {len(train_indices)}")
         trace_func(f"Validation volumes: {len(val_indices)}")
-
+        
         train_set = torch.utils.data.dataset.Subset(dataset, train_indices)
         val_set = torch.utils.data.dataset.Subset(dataset, val_indices)
         val_set.validation = True
@@ -271,13 +395,17 @@ def cross_validator(model, dataset, device, optimizer_class, criterion_class, op
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
         test_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
         
-        train_loss_list, val_loss_list = train(model, criterion, optimizer, train_dataloader, test_dataloader, early_stopper, num_epochs, device, trace_func, scheduler=scheduler)
+        train_loss_list, val_loss_list = train_fun(model, criterion, optimizer, train_dataloader, test_dataloader, early_stopper, num_epochs, device, trace_func, scheduler=scheduler)
         
         model.load_state_dict(torch.load("best_weights.pt"))
 
         train_score.at[i] = train_loss_list
         val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = get_unscaled_loss(model, test_dataloader, dataset)
+        unscaled_loss.at[i] = final_eval_fun(model, test_dataloader, dataset, device, trace_func=trace_func, verbose=True)
+
+        if override_val_pids:
+            # If we are overriding the validation set, we don't want to do any more folds
+            break
     
     os.remove("base_weights.pt")
     

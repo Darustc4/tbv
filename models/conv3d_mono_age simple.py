@@ -54,7 +54,7 @@ class RasterNet(nn.Module):
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, 1)
+            nn.Linear(512, 2)
         )
     
     def forward(self, x):
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
     tr_score, val_score, unscaled_loss = run(
         model, dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
-        train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
+        train_fun=train_tbv_age, final_eval_fun=final_eval_tbv_age, 
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0001, "nesterov": True}, criterion_params={},
         k_fold=6, num_epochs=2000, patience=250,
         batch_size=8, data_workers=8, trace_func=print,
@@ -86,7 +86,7 @@ if __name__ == "__main__":
         scheduler_params={"mode": "min", "factor": 0.5, "patience": 10, "threshold": 0.0001, "verbose": True},
         override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
-
+    
     # first fold training and validation loss plot
     plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
     plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
@@ -94,31 +94,4 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_no_age_single_train.png")
-
-    """
-    figure, axis = plt.subplots(3, 2)
-    for i in range(3):
-        for j in range(2):
-            axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=1.0)
-            axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=1.0)
-            axis[i][j].set_xlabel("Epochs")
-            axis[i][j].set_ylabel("Loss")
-
-    handles, labels = axis[i][j].get_legend_handles_labels()
-    figure.legend(handles, labels, loc='lower center')
-
-    figure.tight_layout()
-    plt.savefig("plots/conv3d_mono_no_age_train.png")
-
-
-    unscaled_loss = pd.DataFrame(unscaled_loss.tolist(), columns=['avg','std'], index=unscaled_loss.index)
-    avg_loss = unscaled_loss['avg']
-    std_loss = unscaled_loss['std']
-
-    plt.clf()
-    plt.errorbar(x=range(6), y=avg_loss, yerr=std_loss, fmt='o')
-    plt.xlabel("Fold")
-    plt.ylabel("TBV Loss")
-    plt.savefig("plots/conv3d_mono_no_age_loss.png")
-    """
+    plt.savefig("plots/conv3d_mono_age_single_train.png")

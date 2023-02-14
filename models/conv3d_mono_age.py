@@ -58,7 +58,7 @@ class RasterNet(nn.Module):
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, 1)
+            nn.Linear(512, 2)
         )
     
     def _make_layer(self, block, planes, blocks, stride=1):
@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
     tr_score, val_score, unscaled_loss = run(
         model, dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
-        train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
+        train_fun=train_tbv_age, final_eval_fun=final_eval_tbv_age, 
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0001, "nesterov": True}, criterion_params={},
         k_fold=6, num_epochs=2000, patience=250,
         batch_size=8, data_workers=8, trace_func=print,
@@ -114,4 +114,4 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_no_age_single_train.png")
+    plt.savefig("plots/conv3d_mono_age_single_train.png")
