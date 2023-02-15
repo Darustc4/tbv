@@ -12,7 +12,7 @@ class RasterNet(nn.Module):
         super(RasterNet, self).__init__()
 
         self.conv0 = nn.Sequential( # 1x96x96x96 -> 32x48x48x48
-            nn.Conv3d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.Conv3d(10, 32, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm3d(32),
             nn.ReLU()
         )
@@ -84,6 +84,7 @@ if __name__ == "__main__":
         batch_size=8, data_workers=8, trace_func=print,
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
         scheduler_params={"mode": "min", "factor": 0.5, "patience": 10, "threshold": 0.0001, "verbose": True},
+        histogram_bins=10, drop_zero_bin=True,
         override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
 
@@ -94,31 +95,4 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_no_age_simple_single_train.png")
-
-    """
-    figure, axis = plt.subplots(3, 2)
-    for i in range(3):
-        for j in range(2):
-            axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=1.0)
-            axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=1.0)
-            axis[i][j].set_xlabel("Epochs")
-            axis[i][j].set_ylabel("Loss")
-
-    handles, labels = axis[i][j].get_legend_handles_labels()
-    figure.legend(handles, labels, loc='lower center')
-
-    figure.tight_layout()
-    plt.savefig("plots/conv3d_mono_no_age_train.png")
-
-
-    unscaled_loss = pd.DataFrame(unscaled_loss.tolist(), columns=['avg','std'], index=unscaled_loss.index)
-    avg_loss = unscaled_loss['avg']
-    std_loss = unscaled_loss['std']
-
-    plt.clf()
-    plt.errorbar(x=range(6), y=avg_loss, yerr=std_loss, fmt='o')
-    plt.xlabel("Fold")
-    plt.ylabel("TBV Loss")
-    plt.savefig("plots/conv3d_mono_no_age_loss.png")
-    """
+    plt.savefig("plots/conv3d_hist_no_age_simple_single_train.png")

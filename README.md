@@ -61,19 +61,7 @@ cd models
 sudo HSA_OVERRIDE_GFX_VERSION=10.3.0 ../venv/bin/python3 conv3d_mono_no_age.py
 
 
+```
 
-
-Architectures to try:
-
-Branch 1:
-- CNN full raster with voxel prediction. Transform TBV to voxel count taking into account the total volume of the raster and the dimensions of each original voxel.
-- LSTM of with final TBV prediction. No pretrain.
-- LSTM of with final TBV prediction. ResNet.
-
-Branch 2: 
-- With raw data, predicting voxel count.
-- With histogram (3D histogram or 2D histogram)
-
-Branch 3:
-- Without age.
-- With age prediction.
+Useful command:
+sudo sh -c "sleep 150m; HSA_OVERRIDE_GFX_VERSION=10.3.0 ../venv/bin/python3 conv3d_mono_no_age.py"

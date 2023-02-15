@@ -91,16 +91,16 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    dataset = RasterDataset(data_dir="../dataset")
+    raw_dataset = RawDataset(data_dir="../dataset")
     model = RasterNet(ResidualBlock, [3, 3, 3, 3]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
     tr_score, val_score, unscaled_loss = run(
-        model, dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
+        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
         train_fun=train_tbv_age, final_eval_fun=final_eval_tbv_age, 
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0001, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=2000, patience=250,
+        k_fold=6, num_epochs=1500, patience=200,
         batch_size=8, data_workers=8, trace_func=print,
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
         scheduler_params={"mode": "min", "factor": 0.5, "patience": 10, "threshold": 0.0001, "verbose": True},

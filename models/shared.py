@@ -9,16 +9,13 @@ import torch
 import torch.nn as nn
 import torchio as tio
 
-from PIL import Image
+from numba import jit
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from torch.utils.data import Dataset, DataLoader
 
-
-class RasterDataset(Dataset):
+class RawDataset:
     def __init__(self, data_dir):
-        self.validation = False
-
         self.data_dir = data_dir
 
         intensity_transform = tio.transforms.RescaleIntensity()
@@ -54,32 +51,121 @@ class RasterDataset(Dataset):
         self.dataset[["age"]] = self.age_std.fit_transform(self.dataset[["age"]])
         self.dataset[["voxels"]] = self.voxels_std.fit_transform(self.dataset[["voxels"]])
 
+    def get_unique_pids(self):
+        return self.dataset["pid"].unique()
+
+    def get_indices_from_pids(self, pids):
+        return self.dataset[self.dataset["pid"].isin(pids)].index
+
+class RasterDataset(Dataset):
+    def __init__(self, dataset, histogram_bins=None, drop_zero_bin=True):
+        self.dataset = dataset
+        self.histogram_bins = histogram_bins
+        self.drop_zero_bin = drop_zero_bin
+
+        if self.drop_zero_bin and self.histogram_bins is not None:
+            self.histogram_bins += 1
+        
+    def _get_histogram(self, raster):
+        raster = raster.squeeze(0).numpy()
+        hist = self._histogram_from_kernels(np.lib.stride_tricks.sliding_window_view(raster, (3, 3, 3)), self.histogram_bins, self.drop_zero_bin)
+        
+        # Reshape to (1, bins, side_len, side_len, side_len)
+        return torch.from_numpy(hist).squeeze().unsqueeze(0)
+
+    @staticmethod
+    @jit(nopython=True) 
+    def _histogram_from_kernels(kernels, bins, drop_zero_bin=True):
+        hist = np.zeros((kernels.shape[0], kernels.shape[1], kernels.shape[2], bins))
+
+        for i in range(kernels.shape[0]):
+            for j in range(kernels.shape[1]):
+                for k in range(kernels.shape[2]):
+                    hist[i, j, k, :] = np.histogram(kernels[i, j, k], bins=bins, range=(0, 255))[0]
+        if drop_zero_bin:
+            hist = hist[:, :, :, 1:]
+        
+        # Reshape to (bins, side_len, side_len, side_len, 1), Can't use np.squeeze because of numba
+        return np.stack(np.split(hist, hist.shape[3], axis=3), axis=0)
+
+    def get_unique_pids(self):
+        return self.raw_dataset.get_unique_pids()
+    
+    def get_indices_from_pids(self, pids):
+        return self.raw_dataset.get_indices_from_pids(pids)
+
+class TrainDataset(RasterDataset):
+    def __init__(self, raw_dataset, pids, histogram_bins=None, drop_zero_bin=True):
+        super().__init__(raw_dataset, histogram_bins, drop_zero_bin)
+
+        self.pid_set = set(pids)
+        self.volumes = self.dataset.get_indices_from_pids(pids)
+
         self.transform = tio.Compose([
             tio.transforms.RandomAffine(scales=0, degrees=10, translation=0.2, default_pad_value='minimum', p=0.25),
-            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.25),
-            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.25),
-            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.25),
-            tio.transforms.RandomBlur(std=0.1, p=0.25)
+            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
+            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
+            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.2),
+            tio.transforms.RandomBlur(std=0.1, p=0.2),
+            tio.transforms.RandomBiasField(p=0.01),
+            tio.transforms.RandomMotion(num_transforms=2, p=0.01),
+            tio.transforms.RandomGhosting(num_ghosts=2, p=0.01),
+            tio.transforms.RandomSwap(p=0.01),
+            tio.transforms.RandomSpike(p=0.01)
         ])
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.volumes)
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        entry = self.dataset.iloc[idx]
-        raster = entry["raster"] if self.validation else self.transform(entry["raster"])
+        entry = self.dataset.dataset.iloc[self.volumes[idx]]
+        raster = self.transform(entry["raster"])
 
-        return {"pid": entry["pid"], "age": entry["age"], "tbv": entry["tbv"], "voxels": entry["voxels"], "voxel_volume": entry["voxel_volume"], "raster": raster}
+        if self.histogram_bins is not None:
+            raster = self._get_histogram(raster)
 
-    def get_unique_pids(self):
-        return self.dataset["pid"].unique()
+        return {
+            "pid": entry["pid"], 
+            "age": entry["age"], 
+            "tbv": entry["tbv"], 
+            "voxels": entry["voxels"], 
+            "voxel_volume": entry["voxel_volume"], 
+            "raster": raster
+        }
+
     
-    def get_indices_from_pids(self, pids):
-        return self.dataset[self.dataset["pid"].isin(pids)].index
-        
+class ValDataset(RasterDataset):
+    def __init__(self, raw_dataset, pids, histogram_bins=None, drop_zero_bin=True):
+        super().__init__(raw_dataset, histogram_bins, drop_zero_bin)
+
+        self.pid_set = set(pids)
+        self.volumes = self.dataset.get_indices_from_pids(pids)
+
+    def __len__(self):
+        return len(self.volumes)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        entry = self.dataset.dataset.iloc[self.volumes[idx]]
+        raster = entry["raster"]
+
+        if self.histogram_bins is not None:
+            raster = self._get_histogram(raster)
+
+        return {
+            "pid": entry["pid"], 
+            "age": entry["age"], 
+            "tbv": entry["tbv"], 
+            "voxels": entry["voxels"], 
+            "voxel_volume": entry["voxel_volume"], 
+            "raster": raster
+        }
+
 class EarlyStopper:
     def __init__(self, patience=25, verbose=False, delta=0, path='checkpoint.pt', trace_func=print):
         """
@@ -221,14 +307,14 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
 
             if (i+1) % 5 == 0:
                 trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
-
+            
         validation_loss = 0.
         model.eval()
         with torch.no_grad():
             for i, data in enumerate(val_dataloader):
                 rasters = data["raster"].float().to(device)
                 voxels = data["voxels"].float().to(device)
-
+                
                 predictions = model(rasters).squeeze()
                 loss = criterion(predictions, voxels)
 
@@ -248,7 +334,7 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
     
     return train_loss_list, val_loss_list
 
-def final_eval_tbv(model, dataloader, dataset, device, trace_func=print, verbose=False):
+def final_eval_tbv(model, dataloader, raw_dataset, device, trace_func=print, verbose=False):
     all_diffs = []
     model.eval()
 
@@ -264,8 +350,8 @@ def final_eval_tbv(model, dataloader, dataset, device, trace_func=print, verbose
             predictions = predictions.detach().numpy().reshape(-1, 1)
             
             # Revert the normalization and standardization
-            predictions = dataset.voxels_std.inverse_transform(predictions)
-            predictions = dataset.voxels_minmax.inverse_transform(predictions)
+            predictions = raw_dataset.voxels_std.inverse_transform(predictions)
+            predictions = raw_dataset.voxels_minmax.inverse_transform(predictions)
             predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
             tbv_diffs = np.abs(predicted_tbvs - tbvs)
@@ -286,8 +372,7 @@ def final_eval_tbv(model, dataloader, dataset, device, trace_func=print, verbose
 
     return avg_diff, std_diff
 
-
-def final_eval_tbv_age(model, dataloader, dataset, device, trace_func=print, verbose=False):
+def final_eval_tbv_age(model, dataloader, raw_dataset, device, trace_func=print, verbose=False):
     all_diffs_tbv = []
     all_diffs_age = []
     model.eval()
@@ -307,11 +392,13 @@ def final_eval_tbv_age(model, dataloader, dataset, device, trace_func=print, ver
             pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
             
             # Revert the normalization and standardization
-            pred_voxels = dataset.voxels_std.inverse_transform(pred_voxels)
-            pred_voxels = dataset.voxels_minmax.inverse_transform(pred_voxels)
-            pred_ages = dataset.age_std.inverse_transform(pred_ages)
-            pred_ages = dataset.age_minmax.inverse_transform(pred_ages)
-
+            pred_voxels = raw_dataset.voxels_std.inverse_transform(pred_voxels)
+            pred_voxels = raw_dataset.voxels_minmax.inverse_transform(pred_voxels)
+            pred_ages = raw_dataset.age_std.inverse_transform(pred_ages)
+            pred_ages = raw_dataset.age_minmax.inverse_transform(pred_ages)
+            ages = raw_dataset.age_std.inverse_transform(ages)
+            ages = raw_dataset.age_minmax.inverse_transform(ages)
+            
             pred_tbvs = pred_voxels * data["voxel_volume"].numpy().reshape(-1, 1)
 
             tbv_diffs = np.abs(pred_tbvs - tbvs)
@@ -340,7 +427,10 @@ def final_eval_tbv_age(model, dataloader, dataset, device, trace_func=print, ver
 
     return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
 
-def run(model, dataset, device, optimizer_class, criterion_class, train_fun, final_eval_fun, optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, override_val_pids=None):
+def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun, final_eval_fun, 
+        optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, 
+        scheduler_class=None, scheduler_params={}, k_fold=6, histogram_bins=None, drop_zero_bin=False, override_val_pids=None):
+
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
 
@@ -348,7 +438,7 @@ def run(model, dataset, device, optimizer_class, criterion_class, train_fun, fin
     val_score = pd.Series(dtype=np.float32)
     unscaled_loss = pd.Series(dtype=np.float32)
     
-    unique_pids = dataset.get_unique_pids()
+    unique_pids = raw_dataset.get_unique_pids()
     total_pids = len(unique_pids)
     fraction = 1/k_fold
     seg = int(total_pids*fraction)
@@ -366,8 +456,8 @@ def run(model, dataset, device, optimizer_class, criterion_class, train_fun, fin
         early_stopper = EarlyStopper(patience=patience, verbose=False, path="best_weights.pt", trace_func=trace_func)
 
         if override_val_pids:
-            val_indices = dataset.get_indices_from_pids(override_val_pids)
-            train_indices = list(set(range(len(dataset))) - set(val_indices))
+            val_pids = override_val_pids
+            train_pids = [pid for pid in unique_pids if pid not in val_pids]
         else:
             trll = 0
             trlr = i * seg
@@ -382,15 +472,14 @@ def run(model, dataset, device, optimizer_class, criterion_class, train_fun, fin
             train_indices = train_left_indices + train_right_indices
             val_indices = list(range(vall,valr))
 
-            train_indices = dataset.get_indices_from_pids(unique_pids[train_indices])
-            val_indices = dataset.get_indices_from_pids(unique_pids[val_indices])
-
-        trace_func(f"Train volumes: {len(train_indices)}")
-        trace_func(f"Validation volumes: {len(val_indices)}")
+            val_pids = unique_pids[val_indices]
+            train_pids = unique_pids[train_indices]
         
-        train_set = torch.utils.data.dataset.Subset(dataset, train_indices)
-        val_set = torch.utils.data.dataset.Subset(dataset, val_indices)
-        val_set.validation = True
+        train_set = TrainDataset(raw_dataset, train_pids, histogram_bins=histogram_bins, drop_zero_bin=drop_zero_bin)
+        val_set = ValDataset(raw_dataset, val_pids, histogram_bins=histogram_bins, drop_zero_bin=drop_zero_bin)
+
+        trace_func(f"Train volumes: {len(train_set)}")
+        trace_func(f"Validation volumes: {len(val_set)}")
 
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
         test_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
@@ -401,7 +490,7 @@ def run(model, dataset, device, optimizer_class, criterion_class, train_fun, fin
 
         train_score.at[i] = train_loss_list
         val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = final_eval_fun(model, test_dataloader, dataset, device, trace_func=trace_func, verbose=True)
+        unscaled_loss.at[i] = final_eval_fun(model, test_dataloader, raw_dataset, device, trace_func=trace_func, verbose=True)
 
         if override_val_pids:
             # If we are overriding the validation set, we don't want to do any more folds
