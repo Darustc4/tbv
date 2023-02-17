@@ -1,11 +1,18 @@
 import matplotlib.pyplot as plt
 
+import os
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.ops as ops
 
 from shared import *
 
+torch.manual_seed(42)
+np.random.seed(42)
 cuda = torch.device('cuda')
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1, downsample=None):
@@ -38,8 +45,8 @@ class RasterNet(nn.Module):
         super(RasterNet, self).__init__()
         self.inplanes = 64
 
-        self.conv0 = nn.Sequential( # 1x96x96x96 -> 64x48x48x48
-            nn.Conv3d(1, 64, kernel_size=7, stride=2, padding=3),
+        self.conv0 = nn.Sequential(
+            nn.Conv3d(10, 64, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm3d(64),
             nn.ReLU()
         )
@@ -49,18 +56,14 @@ class RasterNet(nn.Module):
         self.layer2 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer3 = self._make_layer(block, 512, layers[3], stride=2)
 
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(13824, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 2)
-        )
-    
+        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
+
+        self.do = nn.Dropout(p=0.0)
+        
+        self.fc0 = nn.Linear(512, 1024)
+        self.fc1 = nn.Linear(1024, 1)
+
+
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes:
@@ -78,35 +81,42 @@ class RasterNet(nn.Module):
 
     def forward(self, x):
         x = x.to(cuda)
+
         x = self.conv0(x)
-        x = self.layer0(x)
-        x = self.layer1(x)
+        x = ops.drop_block3d(self.layer0(x), block_size=3, p=self.do.p, training=self.training)
+        x = ops.drop_block3d(self.layer1(x), block_size=3, p=self.do.p, training=self.training)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.fc(x)
 
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.do(x)
+        x = F.relu(self.fc0(x))
+        x = self.do(x)
+        x = self.fc1(x)
+        
         return x
 
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../dataset")
-    model = RasterNet(ResidualBlock, [3, 3, 3, 3]).to(cuda)
+    raw_dataset = RawDataset(data_dir="../dataset", skip_norm=True) # skip_norm=True bc we are using histograms
+    model = RasterNet(ResidualBlock, [2, 2, 2, 2]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
     tr_score, val_score, unscaled_loss = run(
         model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
-        train_fun=train_tbv_age, final_eval_fun=final_eval_tbv_age, 
-        optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0001, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1500, patience=200,
-        batch_size=8, data_workers=8, trace_func=print,
+        train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
+        optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
+        k_fold=6, num_epochs=1500, patience=150, batch_size=8, data_workers=8, trace_func=print,
+        dropout_change=0.01, dropout_change_epochs=1, dropout_range=(0.0, 0.2),
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
-        scheduler_params={"mode": "min", "factor": 0.5, "patience": 10, "threshold": 0.0001, "verbose": True},
-        override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
+        scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
+        histogram_bins=10, drop_zero_bin=True, override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
-    
+
     # first fold training and validation loss plot
     plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
     plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
@@ -114,4 +124,12 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_age_single_train.png")
+
+    # Move best weights and plot to folders
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    if not os.path.exists("plots"):
+        os.makedirs("plots")
+    
+    plt.savefig("plots/conv3d_no_age_hist.png")
+    os.rename("best_weights.pt", "results/conv3d_no_age_hist.pt")

@@ -1,13 +1,17 @@
 # Models
 
-This project predicts TBV and age of patients with 4 different main architectures:
+This project predicts TBV (and age) of patients with 4 different main architectures:
 - Simple and shallow 3D ConvNet.
-- Deep 3D ResNet.
-- Feature engineered histogram preprocessing + Simple ConvNet.
+- 3D ResNet-18.
+- 3D SIFT-CNN.
 - Bayesian 3D Net.
 
-Validating on: ['23', '48', '38', '1', '80', '22', '27', '36']
+Validating on patients '23', '48', '38', '1', '80', '22', '27' and '36'.
+K-folds is reserved only for the final chosen architecture.
 
+All models are trained on 1500 epochs, with a validation patience of 150 epochs. Batch size 8.
+
+The dataset is augmented in runtime using the following pipeline:
 ```
 tio.transforms.RandomAffine(scales=0, degrees=10, translation=0.2, default_pad_value='minimum', p=0.25),
 tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
@@ -26,80 +30,59 @@ tio.transforms.RandomSpike(p=0.01)
 
 3D convolutions and linear perceptron. Age of the patient is not used.
 
-## No Residual
+## Simple Net
 
 Model has 19396225 trainable parameters
 
-1500 epochs. Validation patience of 200 epochs. Batch size 8.
+Criterion: MSE Loss
+Optimizer: SGD. LR 0.001. WD 0.0005. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.0001.
+Dropout: 0.0 to 0.2. +0.01 every epoch.
+
+Results:
+
+![](./plots/conv3d_no_age_simple.png)
+
+## ResNet-18
+
+Model has 33695425 trainable parameters
 
 Criterion: MSE Loss
 Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
 Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
+Dropout: 0.0 to 0.2. +0.01 every epoch.
 
-Results OLD:
-- Average difference: 13.39 cc.   
-- Standard deviation: 13.15 cc.
+Results:
+- Average difference: 12.64 cc.
+- Standard deviation: 13.42 cc.
+  
+![](./plots/conv3d_no_age_resnet.png)
 
-## ResNet [3, 3, 3, 3]
+## SIFT-CNN
 
-Model has 66657601 trainable parameters.
-
-1500 epochs. Validation patience of 200 epochs. Batch size 8.
+Model has 33892993 trainable parameters
 
 Criterion: MSE Loss
-Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
-Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
+Optimizer: SGD. LR 0.001. WD 0.0005. Mo 0.9. Nesterov.
+Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.0001.
+Dropout: 0.0 to 0.2. +0.01 every epoch.
 
-Results OLD:
-- Average difference: 15.1 cc.    
-- Standard deviation: 16.74 cc.
+Results:
+
+![](./plots/conv3d_no_age_hist.png)
+
+
+
+
+
+
+
+
 
 ---
 # 3D Convolution Age
 
 3D convolutions and linear perceptron. Age of the patient is also predicted.
 
-## No Residual
-
-Model has 19396738 trainable parameters.
-
-1500 epochs. Validation patience of 200 epochs. Batch size 8.
-
-Criterion: MSE Loss
-Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
-Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
-
-Results OLD:
-- Average difference TBV: 13.69 cc.	
-- Standard deviation TBV: 13.87 cc.
-- Average difference Age: 9.71 days.	
-- Standard deviation Age: 9.26 days.
-
-## ResNet [3, 3, 3, 3]
-
-Model has 66658114 trainable parameters.
-
-1500 epochs. Validation patience of 200 epochs. Batch size 8.
-
-Criterion: MSE Loss
-Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
-Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
-
-Results OLD:
-- Average difference TBV: 14.15 cc.       
-- Standard deviation TBV: 15.64 cc.
-- Average difference Age: 9.89 days. 
-- Standard deviation Age: 10.14 days.
-
 
 ---
-
-# Other Experiments
-
-
-## Resnet Age [1,1,1,1]
-
-Results:
-
-
-## Resnet NoAge [3,3,3,3]

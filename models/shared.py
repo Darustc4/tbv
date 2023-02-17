@@ -9,25 +9,28 @@ import torch
 import torch.nn as nn
 import torchio as tio
 
+from multiprocessing import Pool
 from numba import jit
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from torch.utils.data import Dataset, DataLoader
 
 class RawDataset:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, skip_norm=False):
         self.data_dir = data_dir
 
-        intensity_transform = tio.transforms.RescaleIntensity()
-        znorm_transform = tio.transforms.ZNormalization()
+        if not skip_norm:
+            intensity_transform = tio.transforms.RescaleIntensity()
+            znorm_transform = tio.transforms.ZNormalization()
 
         data = []
         for file in os.listdir(data_dir):
             image, headers = nrrd.read(os.path.join(data_dir, file))
 
             tensor = torch.from_numpy(image).unsqueeze(0)
-            tensor = intensity_transform(tensor)
-            tensor = znorm_transform(tensor)
+            if not skip_norm:
+                tensor = intensity_transform(tensor)
+                tensor = znorm_transform(tensor)
 
             data.append({
                 "pid": os.path.splitext(file)[0].split("_")[0],
@@ -51,42 +54,59 @@ class RawDataset:
         self.dataset[["age"]] = self.age_std.fit_transform(self.dataset[["age"]])
         self.dataset[["voxels"]] = self.voxels_std.fit_transform(self.dataset[["voxels"]])
 
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        return self.dataset.iloc[index]
+
     def get_unique_pids(self):
         return self.dataset["pid"].unique()
 
     def get_indices_from_pids(self, pids):
         return self.dataset[self.dataset["pid"].isin(pids)].index
-
+    
 class RasterDataset(Dataset):
     def __init__(self, dataset, histogram_bins=None, drop_zero_bin=True):
         self.dataset = dataset
         self.histogram_bins = histogram_bins
         self.drop_zero_bin = drop_zero_bin
 
-        if self.drop_zero_bin and self.histogram_bins is not None:
-            self.histogram_bins += 1
-        
+        if self.histogram_bins is not None:
+            self.intensity_transform = tio.transforms.RescaleIntensity()
+            self.znorm_transform = tio.transforms.ZNormalization()
+
+            if self.drop_zero_bin:
+                self.histogram_bins += 1
+            
     def _get_histogram(self, raster):
         raster = raster.squeeze(0).numpy()
-        hist = self._histogram_from_kernels(np.lib.stride_tricks.sliding_window_view(raster, (3, 3, 3)), self.histogram_bins, self.drop_zero_bin)
+
+        kernels = np.lib.stride_tricks.sliding_window_view(np.pad(raster, 1), (3, 3, 3))
+        hist = self._histogram_from_kernels(kernels, self.histogram_bins, self.drop_zero_bin)
+
+        # Reshape to (bins, side_len, side_len, side_len)
+        hist = torch.from_numpy(np.stack(np.split(hist, hist.shape[3], axis=3), axis=0).squeeze())
         
-        # Reshape to (1, bins, side_len, side_len, side_len)
-        return torch.from_numpy(hist).squeeze().unsqueeze(0)
+        # Normalize histogram
+        hist = self.intensity_transform(hist)
+        hist = self.znorm_transform(hist)
+
+        return hist
 
     @staticmethod
     @jit(nopython=True) 
     def _histogram_from_kernels(kernels, bins, drop_zero_bin=True):
+        # Using numba to speed up the triple loop
+
         hist = np.zeros((kernels.shape[0], kernels.shape[1], kernels.shape[2], bins))
 
         for i in range(kernels.shape[0]):
             for j in range(kernels.shape[1]):
                 for k in range(kernels.shape[2]):
                     hist[i, j, k, :] = np.histogram(kernels[i, j, k], bins=bins, range=(0, 255))[0]
-        if drop_zero_bin:
-            hist = hist[:, :, :, 1:]
         
-        # Reshape to (bins, side_len, side_len, side_len, 1), Can't use np.squeeze because of numba
-        return np.stack(np.split(hist, hist.shape[3], axis=3), axis=0)
+        return hist[:, :, :, 1:] if drop_zero_bin else hist
 
     def get_unique_pids(self):
         return self.raw_dataset.get_unique_pids()
@@ -121,7 +141,7 @@ class TrainDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        entry = self.dataset.dataset.iloc[self.volumes[idx]]
+        entry = self.dataset[self.volumes[idx]]
         raster = self.transform(entry["raster"])
 
         if self.histogram_bins is not None:
@@ -143,6 +163,21 @@ class ValDataset(RasterDataset):
 
         self.pid_set = set(pids)
         self.volumes = self.dataset.get_indices_from_pids(pids)
+        
+        # Rasters can be preprocessed bc they won't be transformed
+        # TODO: Add multiprocessing not to wait 15 seconds...
+        self.preprocessed_rasters = {}
+        for idx in self.volumes:
+            self._preprocess_raster(idx)
+
+    def _preprocess_raster(self, idx):
+        entry = self.dataset[idx]
+        raster = entry["raster"]
+
+        if self.histogram_bins is not None:
+            raster = self._get_histogram(raster)
+
+        self.preprocessed_rasters[idx] = raster
 
     def __len__(self):
         return len(self.volumes)
@@ -151,11 +186,9 @@ class ValDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        entry = self.dataset.dataset.iloc[self.volumes[idx]]
-        raster = entry["raster"]
-
-        if self.histogram_bins is not None:
-            raster = self._get_histogram(raster)
+        idx = self.volumes[idx]
+        entry = self.dataset[idx]
+        raster = self.preprocessed_rasters[idx]
 
         return {
             "pid": entry["pid"], 
@@ -220,11 +253,23 @@ class EarlyStopper:
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
 
-def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
+def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, 
+                  num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
+                  grad_clip=5, trace_func=print, scheduler=None):
+    
     train_loss_list = pd.Series(dtype=np.float32)
     val_loss_list = pd.Series(dtype=np.float32)
 
+    has_do = hasattr(model, "do")
+    dropout_value = model.do.p if has_do else 0.0
+
     for epoch in range(num_epochs):
+        if has_do and epoch % dropout_change_epochs == 0 and epoch != 0:
+            dropout_value += dropout_change
+            dropout_value = max(dropout_value, dropout_range[0])
+            dropout_value = min(dropout_value, dropout_range[1])
+            model.do.p = dropout_value
+            
         training_loss = 0.
         
         model.train()
@@ -242,6 +287,7 @@ def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, ea
             loss = criterion(predictions, ground)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
             optimizer.step()
 
             training_loss += loss.item()
@@ -250,7 +296,7 @@ def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, ea
             gc.collect()
 
             if (i+1) % 5 == 0:
-                trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
+                trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
 
         validation_loss = 0.
         model.eval()
@@ -274,17 +320,29 @@ def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, ea
         if(scheduler):  scheduler.step(train_loss)
 
         stopping = early_stopper(validation_loss, model)
-        trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
         if stopping:
             break
     
     return train_loss_list, val_loss_list
 
-def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, num_epochs, device, trace_func=print, scheduler=None):
+def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, 
+              num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
+              grad_clip=5, trace_func=print, scheduler=None):
+
     train_loss_list = pd.Series(dtype=np.float32)
     val_loss_list = pd.Series(dtype=np.float32)
 
+    has_do = hasattr(model, "do")
+    dropout_value = model.do.p if has_do else 0.0
+
     for epoch in range(num_epochs):
+        if has_do and epoch % dropout_change_epochs == 0 and epoch != 0:
+            dropout_value += dropout_change
+            dropout_value = max(dropout_value, dropout_range[0])
+            dropout_value = min(dropout_value, dropout_range[1])
+            model.do.p = dropout_value
+            
         training_loss = 0.
         
         model.train()
@@ -298,6 +356,7 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
             loss = criterion(predictions, voxels)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
             optimizer.step()
 
             training_loss += loss.item()
@@ -306,7 +365,7 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
             gc.collect()
 
             if (i+1) % 5 == 0:
-                trace_func(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
+                trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
             
         validation_loss = 0.
         model.eval()
@@ -328,7 +387,7 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
         if(scheduler):  scheduler.step(train_loss)
 
         stopping = early_stopper(validation_loss, model)
-        trace_func(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
         if stopping:
             break
     
@@ -428,8 +487,9 @@ def final_eval_tbv_age(model, dataloader, raw_dataset, device, trace_func=print,
     return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
 
 def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun, final_eval_fun, 
-        optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, trace_func=print, 
-        scheduler_class=None, scheduler_params={}, k_fold=6, histogram_bins=None, drop_zero_bin=False, override_val_pids=None):
+        optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, 
+        trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, histogram_bins=None, drop_zero_bin=False, 
+        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), grad_clip=5, override_val_pids=None):
 
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
@@ -482,15 +542,20 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun,
         trace_func(f"Validation volumes: {len(val_set)}")
 
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
-        test_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
+        val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
         
-        train_loss_list, val_loss_list = train_fun(model, criterion, optimizer, train_dataloader, test_dataloader, early_stopper, num_epochs, device, trace_func, scheduler=scheduler)
+        train_loss_list, val_loss_list = train_fun(
+            model, criterion, optimizer, train_dataloader, val_dataloader, 
+            early_stopper, num_epochs, device, trace_func=trace_func, scheduler=scheduler,
+            dropout_change=dropout_change, dropout_change_epochs=dropout_change_epochs, dropout_range=dropout_range, 
+            grad_clip=grad_clip
+        )
         
         model.load_state_dict(torch.load("best_weights.pt"))
 
         train_score.at[i] = train_loss_list
         val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = final_eval_fun(model, test_dataloader, raw_dataset, device, trace_func=trace_func, verbose=True)
+        unscaled_loss.at[i] = final_eval_fun(model, val_dataloader, raw_dataset, device, trace_func=trace_func, verbose=True)
 
         if override_val_pids:
             # If we are overriding the validation set, we don't want to do any more folds

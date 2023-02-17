@@ -1,69 +1,76 @@
 import matplotlib.pyplot as plt
 
+import os
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.ops as ops
 
 from shared import *
 
+torch.manual_seed(42)
+np.random.seed(42)
 cuda = torch.device('cuda')
 
 class RasterNet(nn.Module):
     def __init__(self):
         super(RasterNet, self).__init__()
 
-        self.conv0 = nn.Sequential( # 1x96x96x96 -> 32x48x48x48
+        self.conv0 = nn.Sequential(
             nn.Conv3d(1, 32, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm3d(32),
             nn.ReLU()
         )
 
-        self.conv1 = nn.Sequential( # 32x48x48x48 -> 64x24x24x24
+        self.conv1 = nn.Sequential(
             nn.Conv3d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm3d(64),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2)
         )
 
-        self.conv2 = nn.Sequential( # 64x24x24x24 -> 128x12x12x12
+        self.conv2 = nn.Sequential(
             nn.Conv3d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm3d(128),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2)
         )
 
-        self.conv3 = nn.Sequential( # 128x12x12x12 -> 256x6x6x6
+        self.conv3 = nn.Sequential(
             nn.Conv3d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm3d(256),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2)
         )
 
-        self.conv4 = nn.Sequential( # 256x6x6x6 -> 512x3x3x3
+        self.conv4 = nn.Sequential(
             nn.Conv3d(256, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm3d(512),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=2, stride=2)
         )
 
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(13824, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 1)
-        )
+        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
+
+        self.do = nn.Dropout(0.0)
+
+        self.fc0 = nn.Linear(512, 1024)
+        self.fc1 = nn.Linear(1024, 1)
     
     def forward(self, x):
         x = self.conv0(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
+        x = ops.drop_block3d(self.conv1(x), block_size=3, p=self.do.p, training=self.training)
+        x = ops.drop_block3d(self.conv2(x), block_size=3, p=self.do.p, training=self.training)
         x = self.conv3(x)
         x = self.conv4(x)
-        x = self.fc(x)
+        
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.do(x)
+        x = F.relu(self.fc0(x))
+        x = self.do(x)
+        x = self.fc1(x)
 
         return x
 
@@ -79,11 +86,11 @@ if __name__ == "__main__":
     tr_score, val_score, unscaled_loss = run(
         model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
         train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
-        optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0001, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1500, patience=200,
-        batch_size=8, data_workers=8, trace_func=print,
+        optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
+        k_fold=6, num_epochs=1500, patience=150, batch_size=8, data_workers=8, trace_func=print,
+        dropout_change=0.01, dropout_change_epochs=1, dropout_range=(0.0, 0.2),
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
-        scheduler_params={"mode": "min", "factor": 0.5, "patience": 10, "threshold": 0.0001, "verbose": True},
+        scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
         override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
 
@@ -94,7 +101,15 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.legend()
-    plt.savefig("plots/conv3d_mono_no_age_simple_single_train.png")
+
+    # Move best weights and plot to folders
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    if not os.path.exists("plots"):
+        os.makedirs("plots")
+    
+    plt.savefig("plots/conv3d_no_age_simple.png")
+    os.rename("best_weights.pt", "results/conv3d_no_age_simple.pt")
 
     """
     figure, axis = plt.subplots(3, 2)

@@ -1,10 +1,7 @@
 # Dataset
 dataset/
-aug_dataset/
-tester.ipynb
-models/best_weights.pt
-models/base_weights.pt
 models/test.py
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
