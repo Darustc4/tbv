@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 import os
-
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,8 +9,8 @@ import torchvision.ops as ops
 
 from shared import *
 
-torch.manual_seed(42)
-np.random.seed(42)
+torch.manual_seed(0)
+np.random.seed(0)
 cuda = torch.device('cuda')
 
 
@@ -46,7 +46,7 @@ class RasterNet(nn.Module):
         self.inplanes = 64
 
         self.conv0 = nn.Sequential(
-            nn.Conv3d(10, 64, kernel_size=7, stride=2, padding=3),
+            nn.Conv3d(15, 64, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm3d(64),
             nn.ReLU()
         )
@@ -63,6 +63,7 @@ class RasterNet(nn.Module):
         self.fc0 = nn.Linear(512, 1024)
         self.fc1 = nn.Linear(1024, 1)
 
+        self.enable_dropblock = True
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -80,11 +81,11 @@ class RasterNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = x.to(cuda)
-
         x = self.conv0(x)
-        x = ops.drop_block3d(self.layer0(x), block_size=3, p=self.do.p, training=self.training)
-        x = ops.drop_block3d(self.layer1(x), block_size=3, p=self.do.p, training=self.training)
+        x = self.layer0(x)
+        if self.enable_dropblock: x = ops.drop_block3d(x, block_size=3, p=self.do.p, training=self.training)
+        x = self.layer1(x)
+        if self.enable_dropblock: x = ops.drop_block3d(x, block_size=3, p=self.do.p, training=self.training)
         x = self.layer2(x)
         x = self.layer3(x)
 
@@ -102,19 +103,23 @@ class RasterNet(nn.Module):
 
 if __name__ == "__main__":
     raw_dataset = RawDataset(data_dir="../dataset", skip_norm=True) # skip_norm=True bc we are using histograms
-    model = RasterNet(ResidualBlock, [2, 2, 2, 2]).to(cuda)
+    model = RasterNet(ResidualBlock, [3, 3, 3, 3]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
+
+    histogram_bins = 15
+    drop_zero_bin = True
 
     tr_score, val_score, unscaled_loss = run(
         model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
         train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
         k_fold=6, num_epochs=1500, patience=150, batch_size=8, data_workers=8, trace_func=print,
-        dropout_change=0.01, dropout_change_epochs=1, dropout_range=(0.0, 0.2),
+        dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
         scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
-        histogram_bins=10, drop_zero_bin=True, override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
+        histogram_bins=histogram_bins, drop_zero_bin=drop_zero_bin, 
+        override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
 
     # first fold training and validation loss plot
@@ -126,10 +131,21 @@ if __name__ == "__main__":
     plt.legend()
 
     # Move best weights and plot to folders
-    if not os.path.exists("results"):
-        os.makedirs("results")
+    if not os.path.exists("weights"):
+        os.makedirs("weights")
     if not os.path.exists("plots"):
         os.makedirs("plots")
     
+    label_std_params = {
+        "voxels_min": raw_dataset.voxels_minmax.data_min_.item(),
+        "voxels_max": raw_dataset.voxels_minmax.data_max_.item(),
+        "voxels_mean": raw_dataset.voxels_std.mean_.item(),
+        "voxels_std": raw_dataset.voxels_std.scale_.item(),
+        "histogram_bins": histogram_bins,
+        "drop_zero_bin": drop_zero_bin
+    }
+
+    with open(os.path.join("weights", "conv3d_no_age_hist.json"), "w") as f:
+        json.dump(label_std_params, f)
     plt.savefig("plots/conv3d_no_age_hist.png")
-    os.rename("best_weights.pt", "results/conv3d_no_age_hist.pt")
+    os.rename("best_weights.pt", "weights/conv3d_no_age_hist.pt")

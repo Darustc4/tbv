@@ -1,22 +1,19 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
 import os
 import gc
 import nrrd
 import torch
-import torch.nn as nn
 import torchio as tio
 
-from multiprocessing import Pool
 from numba import jit
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from torch.utils.data import Dataset, DataLoader
 
 class RawDataset:
-    def __init__(self, data_dir, skip_norm=False):
+    def __init__(self, data_dir, skip_norm=False, verbose=True):
         self.data_dir = data_dir
 
         if not skip_norm:
@@ -25,9 +22,9 @@ class RawDataset:
 
         data = []
         for file in os.listdir(data_dir):
-            image, headers = nrrd.read(os.path.join(data_dir, file))
+            raster, headers = nrrd.read(os.path.join(data_dir, file))
 
-            tensor = torch.from_numpy(image).unsqueeze(0)
+            tensor = torch.from_numpy(raster).unsqueeze(0)
             if not skip_norm:
                 tensor = intensity_transform(tensor)
                 tensor = znorm_transform(tensor)
@@ -53,6 +50,18 @@ class RawDataset:
         self.dataset[["voxels"]] = self.voxels_minmax.fit_transform(self.dataset[["voxels"]])
         self.dataset[["age"]] = self.age_std.fit_transform(self.dataset[["age"]])
         self.dataset[["voxels"]] = self.voxels_std.fit_transform(self.dataset[["voxels"]])
+        
+        if verbose:
+            self.print_stats()
+        
+    def print_stats(self):
+        print("Label standardization parameters:")
+        print(f"Voxels min: {self.voxels_minmax.data_min_}, max: {self.voxels_minmax.data_max_}")
+        print(f"Voxels mean: {self.voxels_std.mean_}, std: {self.voxels_std.scale_}")
+        print()
+        print(f"Age min: {self.age_minmax.data_min_}, max: {self.age_minmax.data_max_}")
+        print(f"Age mean: {self.age_std.mean_}, std: {self.age_std.scale_}")
+        print()
 
     def __len__(self):
         return len(self.dataset)
@@ -264,8 +273,8 @@ def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, ea
     dropout_value = model.do.p if has_do else 0.0
 
     for epoch in range(num_epochs):
-        if has_do and epoch % dropout_change_epochs == 0 and epoch != 0:
-            dropout_value += dropout_change
+        if has_do and epoch % dropout_change_epochs == 0:
+            if epoch != 0: dropout_value += dropout_change
             dropout_value = max(dropout_value, dropout_range[0])
             dropout_value = min(dropout_value, dropout_range[1])
             model.do.p = dropout_value
@@ -337,8 +346,8 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
     dropout_value = model.do.p if has_do else 0.0
 
     for epoch in range(num_epochs):
-        if has_do and epoch % dropout_change_epochs == 0 and epoch != 0:
-            dropout_value += dropout_change
+        if has_do and epoch % dropout_change_epochs == 0:
+            if epoch != 0: dropout_value += dropout_change
             dropout_value = max(dropout_value, dropout_range[0])
             dropout_value = min(dropout_value, dropout_range[1])
             model.do.p = dropout_value
@@ -541,8 +550,8 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun,
         trace_func(f"Train volumes: {len(train_set)}")
         trace_func(f"Validation volumes: {len(val_set)}")
 
-        train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
-        val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, drop_last=True, pin_memory=True)
+        train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, pin_memory=True)
+        val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=data_workers, pin_memory=True)
         
         train_loss_list, val_loss_list = train_fun(
             model, criterion, optimizer, train_dataloader, val_dataloader, 

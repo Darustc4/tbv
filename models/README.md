@@ -2,7 +2,7 @@
 
 This project predicts TBV (and age) of patients with 4 different main architectures:
 - Simple and shallow 3D ConvNet.
-- 3D ResNet-18.
+- 3D ResNet-26.
 - 3D SIFT-CNN.
 - Bayesian 3D Net.
 
@@ -37,26 +37,28 @@ Model has 19396225 trainable parameters
 Criterion: MSE Loss
 Optimizer: SGD. LR 0.001. WD 0.0005. Mo 0.9. Nesterov.
 Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.0001.
-Dropout: 0.0 to 0.2. +0.01 every epoch.
+Dropout: 0.3.
 
 Results:
+- Average difference: 13.9 cc.    
+- Standard deviation: 12.0 cc.
 
-![](./plots/conv3d_no_age_simple.png)
+![](./plots/conv3d_no_age_simple_best.png)
 
-## ResNet-18
+## ResNet-26
 
-Model has 33695425 trainable parameters
+Model has 52501825 trainable parameters
 
 Criterion: MSE Loss
 Optimizer: SGD. LR 0.001. WD 0.0001. Mo 0.9. Nesterov.
 Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.0001.
-Dropout: 0.0 to 0.2. +0.01 every epoch.
+Dropout: 0.3.
 
 Results:
-- Average difference: 12.64 cc.
-- Standard deviation: 13.42 cc.
+- Average difference: 12.66 cc.	
+- Standard deviation: 10.69 cc.
   
-![](./plots/conv3d_no_age_resnet.png)
+![](./plots/conv3d_no_age_resnet_best.png)
 
 ## SIFT-CNN
 
@@ -65,11 +67,14 @@ Model has 33892993 trainable parameters
 Criterion: MSE Loss
 Optimizer: SGD. LR 0.001. WD 0.0005. Mo 0.9. Nesterov.
 Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.0001.
-Dropout: 0.0 to 0.2. +0.01 every epoch.
+Dropout: 0.3.
+Histogram bins: 10.
 
 Results:
+- Average difference: 13.35 cc.   
+- Standard deviation: 14.18 cc.
 
-![](./plots/conv3d_no_age_hist.png)
+![](./plots/conv3d_no_age_hist_best.png)
 
 
 

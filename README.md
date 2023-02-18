@@ -64,4 +64,4 @@ sudo HSA_OVERRIDE_GFX_VERSION=10.3.0 ../venv/bin/python3 conv3d_mono_no_age.py
 ```
 
 Useful command:
-sudo sh -c "sleep 150m; HSA_OVERRIDE_GFX_VERSION=10.3.0 ../venv/bin/python3 conv3d_mono_no_age.py"
+sudo sh -c "sleep 150m; HSA_OVERRIDE_GFX_VERSION=10.3.0 ../venv/bin/python3 conv3d_no_age_simple.py"
