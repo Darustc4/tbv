@@ -2,7 +2,7 @@
 
 This project predicts TBV (and age) of patients with 4 different main architectures:
 - Simple and shallow 3D ConvNet.
-- 3D ResNet-26.
+- 3D ResNet-30.
 - 3D SIFT-CNN.
 - Bayesian 3D Net.
 
@@ -40,12 +40,12 @@ Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.000
 Dropout: 0.3.
 
 Results:
-- Average difference: 13.9 cc.    
-- Standard deviation: 12.0 cc.
+- Average difference: 13.15 cc.    
+- Standard deviation: 14.75 cc.
 
 ![](./plots/conv3d_no_age_simple_best.png)
 
-## ResNet-26
+## ResNet-30
 
 Model has 52501825 trainable parameters
 
@@ -55,9 +55,9 @@ Scheduler: ReduceLROnPlateau. Mode min. Factor 0.5. Patience 10. Threshold 0.000
 Dropout: 0.3.
 
 Results:
-- Average difference: 12.66 cc.	
-- Standard deviation: 10.69 cc.
-  
+- Average difference: 10.97 cc.	
+- Standard deviation: 11.91 cc.
+
 ![](./plots/conv3d_no_age_resnet_best.png)
 
 ## SIFT-CNN
@@ -70,24 +70,24 @@ Scheduler: ReduceLROnPlateau. Mode min. Factor 0.4. Patience 10. Threshold 0.000
 Dropout: 0.3.
 Histogram bins: 10.
 
-Results:
-- Average difference: 13.35 cc.   
-- Standard deviation: 14.18 cc.
+Results (PREVIOUS):
+- Average difference: 13.6 cc.    
+- Standard deviation: 16.59 cc.
 
 ![](./plots/conv3d_no_age_hist_best.png)
 
 
-
-
-
-
-
-
-
 ---
-# 3D Convolution Age
+# 3D Convolution Age Output
 
 3D convolutions and linear perceptron. Age of the patient is also predicted.
 
 
 ---
+# 3D Convolution Age Input
+
+3D convolutions and linear perceptron. Age of the patient is also inputted in the last fc layer.
+
+
+
+

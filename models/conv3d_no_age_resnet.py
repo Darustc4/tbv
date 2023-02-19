@@ -44,7 +44,7 @@ class RasterNet(nn.Module):
         super(RasterNet, self).__init__()
         self.inplanes = 64
 
-        self.conv0 = nn.Sequential( # 1x96x96x96 -> 64x48x48x48
+        self.conv0 = nn.Sequential(
             nn.Conv3d(1, 64, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm3d(64),
             nn.ReLU()
@@ -103,17 +103,17 @@ class RasterNet(nn.Module):
 
 if __name__ == "__main__":
     raw_dataset = RawDataset(data_dir="../dataset")
-    model = RasterNet(ResidualBlock, [3, 3, 3, 3]).to(cuda)
+    model = RasterNet(ResidualBlock, [3, 3, 4, 4]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
     tr_score, val_score, unscaled_loss = run(
-        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, 
-        train_fun=train_tbv, final_eval_fun=final_eval_tbv, 
+        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1500, patience=150, batch_size=8, data_workers=8, trace_func=print,
+        k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=150, 
+        batch_size=8, data_workers=8, trace_func=print,
         dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
-        scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau, 
+        scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
         scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
         override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )

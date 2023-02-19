@@ -56,7 +56,7 @@ class RasterNet(nn.Module):
 
         self.fc0 = nn.Linear(1024, 1024)
         self.fc1 = nn.Linear(1024, 1024)
-        self.fc2 = nn.Linear(1024, 1)
+        self.fc2 = nn.Linear(1024, 2)
     
     def forward(self, x):
         x = self.conv0(x)
@@ -86,7 +86,7 @@ if __name__ == "__main__":
     print(f"Model has {model.count_parameters()} trainable parameters")
 
     tr_score, val_score, unscaled_loss = run(
-        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
+        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.OUT_AGE,
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
         k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=125,
         batch_size=8, data_workers=8, trace_func=print,
@@ -117,10 +117,10 @@ if __name__ == "__main__":
         "voxels_std": raw_dataset.voxels_std.scale_.item()
     }
 
-    with open(os.path.join("weights", "conv3d_no_age_simple.json"), "w") as f:
+    with open(os.path.join("weights", "conv3d_out_age_simple.json"), "w") as f:
         json.dump(label_std_params, f)
-    plt.savefig("plots/conv3d_no_age_simple.png")
-    os.rename("best_weights.pt", "weights/conv3d_no_age_simple.pt")
+    plt.savefig("plots/conv3d_out_age_simple.png")
+    os.rename("best_weights.pt", "weights/conv3d_out_age_simple.pt")
 
     """
     figure, axis = plt.subplots(3, 2)
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     figure.legend(handles, labels, loc='lower center')
 
     figure.tight_layout()
-    plt.savefig("plots/conv3d_mono_no_age_train.png")
+    plt.savefig("plots/conv3d_out_age_train.png")
 
 
     unscaled_loss = pd.DataFrame(unscaled_loss.tolist(), columns=['avg','std'], index=unscaled_loss.index)
@@ -146,5 +146,5 @@ if __name__ == "__main__":
     plt.errorbar(x=range(6), y=avg_loss, yerr=std_loss, fmt='o')
     plt.xlabel("Fold")
     plt.ylabel("TBV Loss")
-    plt.savefig("plots/conv3d_mono_no_age_loss.png")
+    plt.savefig("plots/conv3d_out_age_loss.png")
     """

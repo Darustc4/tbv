@@ -15,10 +15,11 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, pids, std_params={}, use_age=False):
+    def __init__(self, data_dir, pids, std_params={}, use_age=False, output_noise=False):
         self.data_dir = data_dir
         self.pids = pids
         self.use_age = use_age
+        self.output_noise = output_noise
 
         try:
             self.histogram_bins = std_params["histogram_bins"]
@@ -46,7 +47,11 @@ class Dataset(torch.utils.data.Dataset):
             # Split filename by _ and get the first element, which is the pid
             pid = file.split("_")[0]
             if pid in pids:
-                raster, headers = nrrd.read(os.path.join(data_dir, file))
+                if self.output_noise:
+                    headers = nrrd.read_header(os.path.join(data_dir, file))
+                    raster = np.random.randint(0, 255, headers["sizes"])
+                else:
+                    raster, headers = nrrd.read(os.path.join(data_dir, file))
 
                 tensor = torch.from_numpy(raster).unsqueeze(0)
                 tensor = self._get_histogram(tensor) if self.histogram_bins else tensor
@@ -148,8 +153,10 @@ if __name__ == "__main__":
     parser.add_argument("--use_latest", action="store_true", help="Use latest weights instead of best")
     parser.add_argument("--mode", type=str, default="lenient", help="Refuse raster option (lenient, normal, strict)")
     parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
+    parser.add_argument("--bayes_runs", type=float, default=10, help="Number of times to estimate each sample")
     parser.add_argument("--data_dir", type=str, default="../dataset", help="Path to the dataset directory")
     parser.add_argument("--weights_dir", type=str, default="./weights", help="Path to the weights directory")
+    parser.add_argument("--noise", action="store_true", help="Use noise instead of proper rasters")
 
     args = parser.parse_args()
 
@@ -165,17 +172,17 @@ if __name__ == "__main__":
     if args.model_name == "simple":
         from conv3d_no_age_simple import RasterNet
         model = RasterNet()
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params)
+        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
 
     elif args.model_name == "resnet":
         from conv3d_no_age_resnet import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [3, 3, 3, 3])
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params)
+        model = RasterNet(ResidualBlock, [3, 3, 4, 4])
+        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
 
     elif args.model_name == "hist":
         from conv3d_no_age_hist import RasterNet, ResidualBlock
         model = RasterNet(ResidualBlock, [2, 2, 2, 2])
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params)
+        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
 
     elif args.model_name == "bayes":
         pass
@@ -183,11 +190,11 @@ if __name__ == "__main__":
     else:
         raise ValueError("Invalid model name")
 
-    if args.mode == "lenient":     refuse_threshold = 0.25
-    elif args.mode == "normal":    refuse_threshold = 0.15
-    elif args.mode == "strict":    refuse_threshold = 0.1
+    if args.mode == "lenient":     refuse_threshold = 0.2
+    elif args.mode == "normal":    refuse_threshold = 0.12
+    elif args.mode == "strict":    refuse_threshold = 0.08
     else: raise ValueError("Invalid mode")
-    
+
     model.load_state_dict(torch.load(os.path.join(args.weights_dir, weights_file), map_location=torch.device('cpu')))
     model.enable_dropblock = False
     model.do.p = args.dropout
@@ -234,7 +241,7 @@ if __name__ == "__main__":
                 tbvs = data["tbv"].float().numpy().reshape(-1, 1)
 
                 all_predictions = []
-                for _ in range(10):
+                for _ in range(args.bayes_runs):
                     predictions = model(rasters).squeeze()
                     all_predictions.append(predictions.detach().numpy())
                 
@@ -246,9 +253,9 @@ if __name__ == "__main__":
                 predictions = dataset.normalize_voxels(predictions, inverse=True)
                 predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
-                predicted_tbvs = (predicted_tbvs + eval_all_tbvs[i * batch_size:(i + 1) * batch_size]) / 2 # Option 1
+                #predicted_tbvs = (predicted_tbvs + eval_all_tbvs[i * batch_size:(i + 1) * batch_size]) / 2 # Option 1
                 #predicted_tbvs = eval_all_tbvs[i * batch_size:(i + 1) * batch_size]                        # Option 2
-                #predicted_tbvs = predicted_tbvs                                                            # Option 3
+                predicted_tbvs = predicted_tbvs                                                            # Option 3
                 
                 tbv_diffs = np.abs(predicted_tbvs - tbvs)
 

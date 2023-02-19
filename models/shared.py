@@ -7,10 +7,12 @@ import nrrd
 import torch
 import torchio as tio
 
+from enum import Enum
 from numba import jit
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from torch.utils.data import Dataset, DataLoader
+
 
 class RawDataset:
     def __init__(self, data_dir, skip_norm=False, verbose=True):
@@ -209,7 +211,7 @@ class ValDataset(RasterDataset):
         }
 
 class EarlyStopper:
-    def __init__(self, patience=25, verbose=False, delta=0, path='checkpoint.pt', trace_func=print):
+    def __init__(self, patience=25, verbose=False, delta=0, ignore_first_epochs=0, path='checkpoint.pt', trace_func=print):
         """
         Args:
             patience (int): How long to wait after last time validation loss improved.
@@ -230,10 +232,13 @@ class EarlyStopper:
         self.early_stop = False
         self.val_loss_min = np.Inf
         self.delta = delta
+        self.ignore_first_epochs = ignore_first_epochs
         self.path = path
         self.trace_func = trace_func
 
-    def __call__(self, val_loss, model=None):
+    def __call__(self, epoch, val_loss, model=None):
+        if epoch < self.ignore_first_epochs:
+            return False
 
         score = -val_loss
 
@@ -262,7 +267,12 @@ class EarlyStopper:
         torch.save(model.state_dict(), self.path)
         self.val_loss_min = val_loss
 
-def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, 
+class TrainMode(Enum):
+    NO_AGE = 0
+    IN_AGE = 1
+    OUT_AGE = 2
+
+def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, train_mode, 
                   num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
                   grad_clip=5, trace_func=print, scheduler=None):
     
@@ -285,85 +295,23 @@ def train_tbv_age(model, criterion, optimizer, tr_dataloader, val_dataloader, ea
         for i, data in enumerate(tr_dataloader):
             rasters = data["raster"].float().to(device)
             voxels = data["voxels"].float().to(device)
-            ages = data["age"].float().to(device)
-
-            ground = torch.dstack((voxels, ages)).squeeze()
-
-            optimizer.zero_grad()
-
-            # split the predictions into predicted voxels and ages
-            predictions = model(rasters).squeeze()
-            loss = criterion(predictions, ground)
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
-            optimizer.step()
-
-            training_loss += loss.item()
-
-            torch.cuda.empty_cache()
-            gc.collect()
-
-            if (i+1) % 5 == 0:
-                trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
-
-        validation_loss = 0.
-        model.eval()
-        with torch.no_grad():
-            for i, data in enumerate(val_dataloader):
-                rasters = data["raster"].float().to(device)
-                voxels = data["voxels"].float().to(device)
+            
+            if train_mode != TrainMode.NO_AGE:
                 ages = data["age"].float().to(device)
-
+                
+            optimizer.zero_grad()
+            
+            if train_mode == TrainMode.NO_AGE:
+                predictions = model(rasters).squeeze()
+                loss = criterion(predictions, voxels)
+            elif train_mode == TrainMode.IN_AGE:
+                predictions = model(rasters, ages.unsqueeze(1)).squeeze()
+                loss = criterion(predictions, voxels)
+            elif train_mode == TrainMode.OUT_AGE:
                 ground = torch.dstack((voxels, ages)).squeeze()
                 predictions = model(rasters).squeeze()
                 loss = criterion(predictions, ground)
 
-                validation_loss += loss.item()
-
-        train_loss = training_loss/len(tr_dataloader)
-        val_loss = validation_loss/len(val_dataloader)
-        train_loss_list.at[epoch] = train_loss
-        val_loss_list.at[epoch] = val_loss
-
-        if(scheduler):  scheduler.step(train_loss)
-
-        stopping = early_stopper(validation_loss, model)
-        trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
-        if stopping:
-            break
-    
-    return train_loss_list, val_loss_list
-
-def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, 
-              num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
-              grad_clip=5, trace_func=print, scheduler=None):
-
-    train_loss_list = pd.Series(dtype=np.float32)
-    val_loss_list = pd.Series(dtype=np.float32)
-
-    has_do = hasattr(model, "do")
-    dropout_value = model.do.p if has_do else 0.0
-
-    for epoch in range(num_epochs):
-        if has_do and epoch % dropout_change_epochs == 0:
-            if epoch != 0: dropout_value += dropout_change
-            dropout_value = max(dropout_value, dropout_range[0])
-            dropout_value = min(dropout_value, dropout_range[1])
-            model.do.p = dropout_value
-            
-        training_loss = 0.
-        
-        model.train()
-        for i, data in enumerate(tr_dataloader):
-            rasters = data["raster"].float().to(device)
-            voxels = data["voxels"].float().to(device)
-
-            optimizer.zero_grad()
-
-            predictions = model(rasters).squeeze()
-            loss = criterion(predictions, voxels)
-
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
             optimizer.step()
@@ -375,7 +323,7 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
 
             if (i+1) % 5 == 0:
                 trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
-            
+
         validation_loss = 0.
         model.eval()
         with torch.no_grad():
@@ -383,8 +331,19 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
                 rasters = data["raster"].float().to(device)
                 voxels = data["voxels"].float().to(device)
                 
-                predictions = model(rasters).squeeze()
-                loss = criterion(predictions, voxels)
+                if train_mode != TrainMode.NO_AGE:
+                    ages = data["age"].float().to(device)
+
+                if train_mode == TrainMode.NO_AGE:
+                    predictions = model(rasters).squeeze()
+                    loss = criterion(predictions, voxels)
+                elif train_mode == TrainMode.IN_AGE:
+                    predictions = model(rasters, ages.reshape(-1, 1)).squeeze()
+                    loss = criterion(predictions, voxels)
+                elif train_mode == TrainMode.OUT_AGE:
+                    ground = torch.dstack((voxels, ages)).squeeze()
+                    predictions = model(rasters).squeeze()
+                    loss = criterion(predictions, ground)
 
                 validation_loss += loss.item()
 
@@ -395,52 +354,14 @@ def train_tbv(model, criterion, optimizer, tr_dataloader, val_dataloader, early_
 
         if(scheduler):  scheduler.step(train_loss)
 
-        stopping = early_stopper(validation_loss, model)
+        stopping = early_stopper(epoch, val_loss, model)
         trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
         if stopping:
             break
     
     return train_loss_list, val_loss_list
 
-def final_eval_tbv(model, dataloader, raw_dataset, device, trace_func=print, verbose=False):
-    all_diffs = []
-    model.eval()
-
-    if(verbose):
-        trace_func("\nEvaluating model on test set...")
-
-    with torch.no_grad():
-        for i, data in enumerate(dataloader):
-            rasters = data["raster"].float().to(device)
-            tbvs = data["tbv"].float().numpy().reshape(-1, 1)
-
-            predictions = model(rasters).squeeze().cpu()
-            predictions = predictions.detach().numpy().reshape(-1, 1)
-            
-            # Revert the normalization and standardization
-            predictions = raw_dataset.voxels_std.inverse_transform(predictions)
-            predictions = raw_dataset.voxels_minmax.inverse_transform(predictions)
-            predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
-
-            tbv_diffs = np.abs(predicted_tbvs - tbvs)
-            all_diffs.append(tbv_diffs)
-
-            if(verbose and i < 5):
-                for j in range(len(tbvs)):
-                    trace_func(f"Predicted TBV: {predicted_tbvs[j][0]:.2f}\tActual TBV: {tbvs[j][0]:.2f}\tDifference: {tbv_diffs[j][0]:.2f}")
-
-    all_diffs = np.concatenate(all_diffs)
-    
-    avg_diff = round(np.mean(all_diffs), 2)
-    std_diff = round(np.std(all_diffs), 2)
-
-    if(verbose):
-        trace_func()
-        trace_func(f"Average difference: {avg_diff} cc.\tStandard deviation: {std_diff} cc.")
-
-    return avg_diff, std_diff
-
-def final_eval_tbv_age(model, dataloader, raw_dataset, device, trace_func=print, verbose=False):
+def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=print, verbose=False):
     all_diffs_tbv = []
     all_diffs_age = []
     model.eval()
@@ -452,53 +373,71 @@ def final_eval_tbv_age(model, dataloader, raw_dataset, device, trace_func=print,
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float().to(device)
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
-            ages = data["age"].float().numpy().reshape(-1, 1)
+            if train_mode != TrainMode.NO_AGE:
+                ages = data["age"].float().reshape(-1, 1)
 
-            predictions = model(rasters).squeeze().cpu()
-            pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
+            if train_mode == TrainMode.NO_AGE:
+                pred_voxels = model(rasters).squeeze().cpu()
+            elif train_mode == TrainMode.IN_AGE:
+                pred_voxels = model(rasters, ages.to(device)).squeeze().cpu()
+                ages = ages.cpu()
+            elif train_mode == TrainMode.OUT_AGE:
+                predictions = model(rasters).squeeze().cpu()
+                pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
+                pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
+            
             pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
-            pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
             
             # Revert the normalization and standardization
             pred_voxels = raw_dataset.voxels_std.inverse_transform(pred_voxels)
             pred_voxels = raw_dataset.voxels_minmax.inverse_transform(pred_voxels)
-            pred_ages = raw_dataset.age_std.inverse_transform(pred_ages)
-            pred_ages = raw_dataset.age_minmax.inverse_transform(pred_ages)
-            ages = raw_dataset.age_std.inverse_transform(ages)
-            ages = raw_dataset.age_minmax.inverse_transform(ages)
             
+            if train_mode == TrainMode.OUT_AGE:
+                pred_ages = raw_dataset.age_std.inverse_transform(pred_ages)
+                pred_ages = raw_dataset.age_minmax.inverse_transform(pred_ages)
+                ages = raw_dataset.age_std.inverse_transform(ages)
+                ages = raw_dataset.age_minmax.inverse_transform(ages)
+                
             pred_tbvs = pred_voxels * data["voxel_volume"].numpy().reshape(-1, 1)
 
             tbv_diffs = np.abs(pred_tbvs - tbvs)
-            age_diffs = np.abs(pred_ages - ages)
-
             all_diffs_tbv.append(tbv_diffs)
-            all_diffs_age.append(age_diffs)
+            
+            if train_mode == TrainMode.OUT_AGE:
+                age_diffs = np.abs(pred_ages - ages)
+                all_diffs_age.append(age_diffs)
 
             if(verbose and i < 5):
                 for j in range(len(tbvs)):
                     trace_func(f"Predicted TBV: {pred_tbvs[j][0]:.2f}\tActual TBV: {tbvs[j][0]:.2f}\tDifference: {tbv_diffs[j][0]:.2f}")
-                    trace_func(f"Predicted Age: {pred_ages[j][0]:.2f}\tActual Age: {ages[j][0]:.2f}\tDifference: {age_diffs[j][0]:.2f}")
+                    if train_mode == TrainMode.OUT_AGE:
+                        trace_func(f"Predicted Age: {pred_ages[j][0]:.2f}\tActual Age: {ages[j][0]:.2f}\tDifference: {age_diffs[j][0]:.2f}")
 
     all_diffs_tbv = np.concatenate(all_diffs_tbv)
-    all_diffs_age = np.concatenate(all_diffs_age)
-    
     avg_diff_tbv = round(np.mean(all_diffs_tbv), 2)
     std_diff_tbv = round(np.std(all_diffs_tbv), 2)
-    avg_diff_age = round(np.mean(all_diffs_age), 2)
-    std_diff_age = round(np.std(all_diffs_age), 2)
+    
+    if train_mode == TrainMode.OUT_AGE:
+        all_diffs_age = np.concatenate(all_diffs_age)
+        avg_diff_age = round(np.mean(all_diffs_age), 2)
+        std_diff_age = round(np.std(all_diffs_age), 2)
 
     if(verbose):
         trace_func()
         trace_func(f"Average difference TBV: {avg_diff_tbv} cc.\tStandard deviation TBV: {std_diff_tbv} cc.")
-        trace_func(f"Average difference Age: {avg_diff_age} days.\tStandard deviation Age: {std_diff_age} days.")
+        if train_mode == TrainMode.OUT_AGE:
+            trace_func(f"Average difference Age: {avg_diff_age} days.\tStandard deviation Age: {std_diff_age} days.")
 
-    return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
+    if train_mode == TrainMode.OUT_AGE:
+        return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
+    else:
+        return avg_diff_tbv, std_diff_tbv
 
-def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun, final_eval_fun, 
-        optimizer_params={}, criterion_params={}, num_epochs=400, patience=30, batch_size=8, data_workers=4, 
-        trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, histogram_bins=None, drop_zero_bin=False, 
-        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), grad_clip=5, override_val_pids=None):
+def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
+        optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, early_stop_ignore_first_epochs= 100, 
+        batch_size=8, data_workers=4, trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, 
+        histogram_bins=None, drop_zero_bin=False, grad_clip=5, override_val_pids=None,
+        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0)):
 
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
@@ -522,7 +461,10 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun,
         criterion = criterion_class(**criterion_params)
         optimizer = optimizer_class(model.parameters(), **optimizer_params)
         scheduler = None if not scheduler_class else scheduler_class(optimizer, **scheduler_params)
-        early_stopper = EarlyStopper(patience=patience, verbose=False, path="best_weights.pt", trace_func=trace_func)
+        early_stopper = EarlyStopper(
+            patience=patience, ignore_first_epochs=early_stop_ignore_first_epochs, 
+            verbose=False, path="best_weights.pt", trace_func=trace_func
+        )
 
         if override_val_pids:
             val_pids = override_val_pids
@@ -553,9 +495,9 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun,
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, pin_memory=True)
         val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=data_workers, pin_memory=True)
         
-        train_loss_list, val_loss_list = train_fun(
-            model, criterion, optimizer, train_dataloader, val_dataloader, 
-            early_stopper, num_epochs, device, trace_func=trace_func, scheduler=scheduler,
+        train_loss_list, val_loss_list = train(
+            model, criterion, optimizer, train_dataloader, val_dataloader, early_stopper, 
+            train_mode, num_epochs, device, trace_func=trace_func, scheduler=scheduler,
             dropout_change=dropout_change, dropout_change_epochs=dropout_change_epochs, dropout_range=dropout_range, 
             grad_clip=grad_clip
         )
@@ -564,7 +506,7 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_fun,
 
         train_score.at[i] = train_loss_list
         val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = final_eval_fun(model, val_dataloader, raw_dataset, device, trace_func=trace_func, verbose=True)
+        unscaled_loss.at[i] = final_eval(model, val_dataloader, raw_dataset, device, train_mode, trace_func=trace_func, verbose=True)
 
         if override_val_pids:
             # If we are overriding the validation set, we don't want to do any more folds
