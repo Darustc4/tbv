@@ -54,10 +54,9 @@ class RasterNet(nn.Module):
 
         self.do = nn.Dropout(0.0)
 
-        self.fc0 = nn.Linear(1024, 1024)
+        self.fc0 = nn.Linear(1025, 1024)
         self.fc1 = nn.Linear(1024, 1024)
-        self.fc2 = nn.Linear(1024, 9)
-        self.fc3 = nn.Linear(10, 1)
+        self.fc2 = nn.Linear(1024, 1)
     
     def forward(self, raster, age):
         x = self.conv0(raster)
@@ -68,15 +67,14 @@ class RasterNet(nn.Module):
         
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
+        x = torch.cat((x, age), dim=1)
+
         x = self.do(x)
         x = F.relu(self.fc0(x))
         x = self.do(x)
         x = F.relu(self.fc1(x))
         x = self.do(x)
         x = self.fc2(x)
-
-        x = torch.cat((x, age), dim=1)
-        x = self.fc3(x)
 
         return x
 

@@ -136,7 +136,11 @@ if __name__ == "__main__":
         "voxels_min": raw_dataset.voxels_minmax.data_min_.item(),
         "voxels_max": raw_dataset.voxels_minmax.data_max_.item(),
         "voxels_mean": raw_dataset.voxels_std.mean_.item(),
-        "voxels_std": raw_dataset.voxels_std.scale_.item()
+        "voxels_std": raw_dataset.voxels_std.scale_.item(),
+        "age_min": raw_dataset.age_minmax.data_min_.item(),
+        "age_max": raw_dataset.age_minmax.data_max_.item(),
+        "age_mean": raw_dataset.age_std.mean_.item(),
+        "age_std": raw_dataset.age_std.scale_.item()
     }
 
     with open(os.path.join("weights", "conv3d_out_age_resnet.json"), "w") as f:

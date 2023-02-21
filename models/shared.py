@@ -15,8 +15,12 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class RawDataset:
-    def __init__(self, data_dir, skip_norm=False, verbose=True):
+    def __init__(self, data_dir, skip_norm=False, compute_prev_scans=False, prev_scans_n=3, prev_scans_no_age=False, prev_scans_age_as_diff=False, verbose=True):
         self.data_dir = data_dir
+        self.compute_prev_scans = compute_prev_scans
+        self.prev_scans_n = prev_scans_n
+        self.prev_scans_no_age = prev_scans_no_age
+        self.prev_scans_age_as_diff = prev_scans_age_as_diff
 
         if not skip_norm:
             intensity_transform = tio.transforms.RescaleIntensity()
@@ -56,6 +60,35 @@ class RawDataset:
         if verbose:
             self.print_stats()
         
+        if self.compute_prev_scans:
+            prev_scans = []
+            for _, scan in self.dataset.iterrows():
+                prev_scans.append(self._get_previous_scans(scan["pid"], scan["age"], add_noise=False))
+            self.dataset["prev_scans"] = prev_scans
+    
+    def _get_previous_scans(self, pid, age, add_noise=False):
+        prev_scans = self.get_previous_scan_metadata(pid, age, self.prev_scans_n)
+        n_features = self.prev_scans_n if self.prev_scans_no_age else self.prev_scans_n*2
+
+        if prev_scans is None:
+            return np.zeros((n_features))
+        
+        if self.prev_scans_no_age:  prev_scans = prev_scans[['voxels']].to_numpy().flatten()
+        else:                       prev_scans = prev_scans[['voxels', 'age']].to_numpy().flatten()
+        
+        if add_noise:
+            prev_scans[['voxels']] += np.random.normal(0, 0.05, prev_scans[['voxels']].shape)
+
+        prev_scans = np.pad(prev_scans, (0, n_features - len(prev_scans)), 'constant', constant_values=0)
+        
+        return prev_scans
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        return self.dataset.iloc[index]
+
     def print_stats(self):
         print("Label standardization parameters:")
         print(f"Voxels min: {self.voxels_minmax.data_min_}, max: {self.voxels_minmax.data_max_}")
@@ -65,17 +98,16 @@ class RawDataset:
         print(f"Age mean: {self.age_std.mean_}, std: {self.age_std.scale_}")
         print()
 
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        return self.dataset.iloc[index]
-
     def get_unique_pids(self):
         return self.dataset["pid"].unique()
 
     def get_indices_from_pids(self, pids):
         return self.dataset[self.dataset["pid"].isin(pids)].index
+    
+    def get_previous_scan_metadata(self, pid, age, n=3):
+        previous_scans = self.dataset[(self.dataset["pid"] == pid) & (self.dataset["age"] < age)].sort_values("age", ascending=False)
+        if self.prev_scans_age_as_diff: previous_scans["age"] = previous_scans["age"] - age
+        return previous_scans.iloc[:n].drop(columns=["raster"]) if len(previous_scans) > 0 else None
     
 class RasterDataset(Dataset):
     def __init__(self, dataset, histogram_bins=None, drop_zero_bin=True):
@@ -164,7 +196,8 @@ class TrainDataset(RasterDataset):
             "tbv": entry["tbv"], 
             "voxels": entry["voxels"], 
             "voxel_volume": entry["voxel_volume"], 
-            "raster": raster
+            "raster": raster,
+            "prev_scans": entry["prev_scans"] if "prev_scans" in entry else None
         }
 
     
@@ -207,7 +240,8 @@ class ValDataset(RasterDataset):
             "tbv": entry["tbv"], 
             "voxels": entry["voxels"], 
             "voxel_volume": entry["voxel_volume"], 
-            "raster": raster
+            "raster": raster,
+            "prev_scans": entry["prev_scans"] if "prev_scans" in entry else None
         }
 
 class EarlyStopper:
@@ -271,6 +305,7 @@ class TrainMode(Enum):
     NO_AGE = 0
     IN_AGE = 1
     OUT_AGE = 2
+    PREV_SCANS = 3
 
 def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, train_mode, 
                   num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
@@ -298,6 +333,9 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
             
             if train_mode != TrainMode.NO_AGE:
                 ages = data["age"].float().to(device)
+            
+            if train_mode == TrainMode.PREV_SCANS:
+                prev_scans = data["prev_scans"].float().to(device)
                 
             optimizer.zero_grad()
             
@@ -311,6 +349,9 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                 ground = torch.dstack((voxels, ages)).squeeze()
                 predictions = model(rasters).squeeze()
                 loss = criterion(predictions, ground)
+            elif train_mode == TrainMode.PREV_SCANS:
+                predictions = model(rasters, ages.unsqueeze(1), prev_scans).squeeze()
+                loss = criterion(predictions, voxels)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
@@ -333,6 +374,9 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                 
                 if train_mode != TrainMode.NO_AGE:
                     ages = data["age"].float().to(device)
+                
+                if train_mode == TrainMode.PREV_SCANS:
+                    prev_scans = data["prev_scans"].float().to(device)
 
                 if train_mode == TrainMode.NO_AGE:
                     predictions = model(rasters).squeeze()
@@ -344,6 +388,9 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                     ground = torch.dstack((voxels, ages)).squeeze()
                     predictions = model(rasters).squeeze()
                     loss = criterion(predictions, ground)
+                elif train_mode == TrainMode.PREV_SCANS:
+                    predictions = model(rasters, ages.unsqueeze(1), prev_scans).squeeze()
+                    loss = criterion(predictions, voxels)
 
                 validation_loss += loss.item()
 
@@ -373,9 +420,13 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float().to(device)
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
+            
             if train_mode != TrainMode.NO_AGE:
                 ages = data["age"].float().reshape(-1, 1)
 
+            if train_mode == TrainMode.PREV_SCANS:
+                prev_scans = data["prev_scans"].float().to(device)
+            
             if train_mode == TrainMode.NO_AGE:
                 pred_voxels = model(rasters).squeeze().cpu()
             elif train_mode == TrainMode.IN_AGE:
@@ -385,6 +436,9 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
                 predictions = model(rasters).squeeze().cpu()
                 pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
                 pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
+            elif train_mode == TrainMode.PREV_SCANS:
+                pred_voxels = model(rasters, ages.to(device), prev_scans).squeeze().cpu()
+                ages = ages.cpu()
             
             pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
             

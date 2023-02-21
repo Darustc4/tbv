@@ -39,9 +39,6 @@ class Dataset(torch.utils.data.Dataset):
             self.age_mean = std_params["age_mean"]
             self.age_std = std_params["age_std"]
 
-        self.intensity_transform = tio.transforms.RescaleIntensity()
-        self.znorm_transform = tio.transforms.ZNormalization()
-
         data = []
         for file in os.listdir(data_dir):
             # Split filename by _ and get the first element, which is the pid
@@ -55,8 +52,6 @@ class Dataset(torch.utils.data.Dataset):
 
                 tensor = torch.from_numpy(raster).unsqueeze(0)
                 tensor = self._get_histogram(tensor) if self.histogram_bins else tensor
-                tensor = self.intensity_transform(tensor)
-                tensor = self.znorm_transform(tensor)
 
                 data.append({
                     "pid": os.path.splitext(file)[0].split("_")[0],
@@ -152,8 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_bayesian", action="store_true", help="Skip bayesian dropout")
     parser.add_argument("--use_latest", action="store_true", help="Use latest weights instead of best")
     parser.add_argument("--mode", type=str, default="lenient", help="Refuse raster option (lenient, normal, strict)")
-    parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
-    parser.add_argument("--bayes_runs", type=float, default=10, help="Number of times to estimate each sample")
+    parser.add_argument("--bayes_runs", type=int, default=10, help="Number of times to estimate each sample")
     parser.add_argument("--data_dir", type=str, default="../dataset", help="Path to the dataset directory")
     parser.add_argument("--weights_dir", type=str, default="./weights", help="Path to the weights directory")
     parser.add_argument("--noise", action="store_true", help="Use noise instead of proper rasters")
@@ -190,30 +184,42 @@ if __name__ == "__main__":
     else:
         raise ValueError("Invalid model name")
 
-    if args.mode == "lenient":     refuse_threshold = 0.2
+    if args.mode == "lenient":     refuse_threshold = 0.18
     elif args.mode == "normal":    refuse_threshold = 0.12
     elif args.mode == "strict":    refuse_threshold = 0.08
     else: raise ValueError("Invalid mode")
 
     model.load_state_dict(torch.load(os.path.join(args.weights_dir, weights_file), map_location=torch.device('cpu')))
-    model.enable_dropblock = False
-    model.do.p = args.dropout
+    model.eval()
 
     batch_size = 8
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
+    
+    intensity_transform = tio.transforms.RescaleIntensity()
+    znorm_transform = tio.transforms.ZNormalization()
 
     print("Computing the mean and standard deviation of the test set for non-bayesian mode...")
 
     eval_all_diffs = []
     eval_all_tbvs = []
+    transforms = tio.Compose([
+        tio.transforms.RandomAffine(scales=0, degrees=20, translation=0.25, default_pad_value='minimum', p=0.8),
+        tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.3),
+        tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
+        tio.transforms.RandomNoise(mean=0, std=0.15, p=0.3),
+        tio.transforms.RandomBlur(std=0.15, p=0.3)
+    ])
 
-    model.eval()
     with torch.no_grad():
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float()
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
 
-            predictions = model(rasters).squeeze().reshape(-1, 1)
+            trf_rasters = torch.zeros(rasters.shape)
+            for j in range(rasters.shape[0]):
+                trf_rasters[j] = znorm_transform(intensity_transform(tio.ScalarImage(tensor=rasters[j]))).tensor
+
+            predictions = model(trf_rasters).squeeze().reshape(-1, 1)
 
             predictions = dataset.normalize_voxels(predictions, inverse=True)
             predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
@@ -234,7 +240,6 @@ if __name__ == "__main__":
         
         refused_raster_count = 0
 
-        model.train()
         with torch.no_grad():
             for i, data in enumerate(dataloader):
                 rasters = data["raster"].float()
@@ -242,7 +247,11 @@ if __name__ == "__main__":
 
                 all_predictions = []
                 for _ in range(args.bayes_runs):
-                    predictions = model(rasters).squeeze()
+                    trf_rasters = torch.zeros(rasters.shape)
+                    for j in range(rasters.shape[0]):
+                        trf_rasters[j] = znorm_transform(intensity_transform(transforms(tio.ScalarImage(tensor=rasters[j])))).tensor
+                    
+                    predictions = model(trf_rasters).squeeze()
                     all_predictions.append(predictions.detach().numpy())
                 
                 all_predictions = np.stack(all_predictions)
@@ -254,8 +263,8 @@ if __name__ == "__main__":
                 predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
                 #predicted_tbvs = (predicted_tbvs + eval_all_tbvs[i * batch_size:(i + 1) * batch_size]) / 2 # Option 1
-                #predicted_tbvs = eval_all_tbvs[i * batch_size:(i + 1) * batch_size]                        # Option 2
-                predicted_tbvs = predicted_tbvs                                                            # Option 3
+                predicted_tbvs = eval_all_tbvs[i * batch_size:(i + 1) * batch_size]                        # Option 2
+                #predicted_tbvs = predicted_tbvs                                                            # Option 3
                 
                 tbv_diffs = np.abs(predicted_tbvs - tbvs)
 
