@@ -2,6 +2,7 @@
 dataset/
 raw/
 models/test.py
+*.pt
 models/weights
 
 # Byte-compiled / optimized / DLL files
