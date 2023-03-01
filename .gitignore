@@ -1,5 +1,8 @@
 # Dataset
-dataset/
+dataset/cut/
+dataset/original/
+dataset/segmented/
+dataset/untagged/
 raw/
 models/test.py
 *.pt
