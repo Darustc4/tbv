@@ -3,7 +3,7 @@ dataset/
 raw/
 models/test.py
 *.pt
-models/weights
+models/regression/weights
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

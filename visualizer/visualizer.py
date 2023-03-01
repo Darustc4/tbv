@@ -14,7 +14,7 @@ ctk.set_default_color_theme("dark-blue")
 
 class BrainVisualizer(ctk.CTk):
     def __init__(self):
-        self.default_path = "/home/daru/code/tbv/dataset/1_01-03-2018.nrrd"
+        self.default_path = "/home/daru/code/tbv/dataset/original/1_01-03-2018.nrrd"
         self.weights_path = "/home/daru/code/tbv/visualizer/network/weights.pt"
         self.norm_path = "/home/daru/code/tbv/visualizer/network/norm.json"
         
@@ -343,6 +343,7 @@ class BrainVisualizer(ctk.CTk):
             self.nrrd_data, self.nrrd_headers = nrrd.read(nrrd_path)
         except Exception as e:
             self.send_message("NRRD file not found or can not be opened.")
+            print(e)
             return
 
         self.age = self.nrrd_headers['age_days'] if 'age_days' in self.nrrd_headers else -1
