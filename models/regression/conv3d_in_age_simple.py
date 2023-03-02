@@ -82,7 +82,7 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../dataset")
+    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, crop_factor=0.8)
     model = RasterNet().to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
@@ -113,10 +113,10 @@ if __name__ == "__main__":
         os.makedirs("plots")
     
     label_std_params = {
-        "voxels_min": raw_dataset.voxels_minmax.data_min_.item(),
-        "voxels_max": raw_dataset.voxels_minmax.data_max_.item(),
-        "voxels_mean": raw_dataset.voxels_std.mean_.item(),
-        "voxels_std": raw_dataset.voxels_std.scale_.item()
+        "voxels_min": raw_dataset.voxels_min,
+        "voxels_max": raw_dataset.voxels_max,
+        "voxels_mean": raw_dataset.voxels_mean,
+        "voxels_std": raw_dataset.voxels_std
     }
 
     with open(os.path.join("weights", "conv3d_in_age_simple.json"), "w") as f:

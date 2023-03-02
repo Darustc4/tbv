@@ -102,7 +102,7 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../original/dataset", sample_size=96)
+    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, crop_factor=0.9)
     model = RasterNet(ResidualBlock, [3, 3, 4, 4]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     tr_score, val_score, unscaled_loss = run(
         model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=150, 
+        k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=125, 
         batch_size=8, data_workers=8, trace_func=print,
         dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
@@ -133,10 +133,10 @@ if __name__ == "__main__":
         os.makedirs("plots")
     
     label_std_params = {
-        "voxels_min": raw_dataset.voxels_minmax.data_min_.item(),
-        "voxels_max": raw_dataset.voxels_minmax.data_max_.item(),
-        "voxels_mean": raw_dataset.voxels_std.mean_.item(),
-        "voxels_std": raw_dataset.voxels_std.scale_.item()
+        "voxels_min": raw_dataset.voxels_min,
+        "voxels_max": raw_dataset.voxels_max,
+        "voxels_mean": raw_dataset.voxels_mean,
+        "voxels_std": raw_dataset.voxels_std
     }
 
     with open(os.path.join("weights", "conv3d_no_age_resnet.json"), "w") as f:

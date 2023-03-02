@@ -48,6 +48,9 @@ Results:
 
 <img src="./plots/conv3d_no_age_resnet_best.png" width="500">
 
+
+Average difference TBV: 20.44 cc.       Standard deviation TBV: 14.83 cc.
+
 ## :arrow_forward: SIFT-CNN
 
 Results (PREVIOUS):

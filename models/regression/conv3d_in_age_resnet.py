@@ -104,7 +104,7 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../dataset")
+    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, crop_factor=0.8)
     model = RasterNet(ResidualBlock, [3, 3, 4, 4]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")

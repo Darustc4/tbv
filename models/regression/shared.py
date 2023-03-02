@@ -9,8 +9,6 @@ import torch
 import torchio as tio
 
 from enum import Enum
-from numba import jit
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -18,11 +16,21 @@ from torch.utils.data import Dataset, DataLoader
 class RawDataset:
     def __init__(self, data_dir, side_len=96, crop_factor=0.8, verbose=True):
         self.data_dir = data_dir
-        self.side_len = np.array([side_len])*3
+        self.side_len = side_len
         self.crop_factor = crop_factor
 
         intensity_transform = tio.transforms.RescaleIntensity()
         znorm_transform = tio.transforms.ZNormalization()
+
+        self.voxels_min = np.inf
+        self.voxels_max = -np.inf
+        self.voxels_mean = 0
+        self.voxels_std = 0
+
+        self.age_min = np.inf
+        self.age_max = -np.inf
+        self.age_mean = 0
+        self.age_std = 0
 
         data = []
         for file in os.listdir(data_dir):
@@ -31,116 +39,133 @@ class RawDataset:
             tensor = intensity_transform(tensor)
             tensor = znorm_transform(tensor)
 
+            pid = os.path.splitext(file)[0].split("_")[0]
             voxel_vol = np.prod(headers["spacings"])
+            tbv = float(headers["tbv"])
+            age = int(headers["age_days"])
+
+            upper_voxels, lower_voxels = self._get_voxel_range(tensor, tbv, voxel_vol)
             data.append({
-                "pid": os.path.splitext(file)[0].split("_")[0],
-                "age": headers["age_days"],
-                "tbv": headers["tbv"],
-                "avg_voxels": self._get_avg_voxels(raster, headers["tbv"], voxel_vol),
+                "pid": pid,
+                "age": age,
+                "tbv": tbv,
+                "avg_voxels": (upper_voxels + lower_voxels) / 2,
                 "voxel_vol": voxel_vol,
                 "raster": tensor
             })
+
+            if verbose:
+                print(f"Loaded {pid} with {lower_voxels:.2f} - {upper_voxels:.2f} voxels")
+                print(f"Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3")
+                print()
+
+            self.voxels_min = min(self.voxels_min, lower_voxels)
+            self.voxels_max = max(self.voxels_max, upper_voxels)
+            self.age_min = min(self.age_min, age)
+            self.age_max = max(self.age_max, age)
         
         # Note: The voxels the brain occupies are calculated on the fly depending on cropping and zooming 
-        #       'avg_voxels' is only meant for data standardization, not for prediction
+        #       'avg_voxels' is only meant for data standardization, not for prediction. 
+        #       It is dropped after we have the mean and std for the dataset. 
 
         self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "avg_voxels", "voxel_vol", "raster"], data=data)
         self.dataset[["age", "tbv", "avg_voxels", "voxel_vol"]] = self.dataset[["age", "tbv", "avg_voxels", "voxel_vol"]].apply(pd.to_numeric)
 
-        self.age_minmax = MinMaxScaler()
-        self.voxels_minmax = MinMaxScaler()
-        self.age_std = StandardScaler()
-        self.voxels_std = StandardScaler()
+        self.voxels_mean = self.dataset["avg_voxels"].mean()
+        self.voxels_std = self.dataset["avg_voxels"].std()
+        self.age_mean = self.dataset["age"].mean()
+        self.age_std = self.dataset["age"].std()
 
-        self.dataset[["age"]] = self.age_minmax.fit_transform(self.dataset[["age"]])
-        self.dataset[["voxels"]] = self.voxels_minmax.fit_transform(self.dataset[["voxels"]])
-        self.dataset[["age"]] = self.age_std.fit_transform(self.dataset[["age"]])
-        self.dataset[["voxels"]] = self.voxels_std.fit_transform(self.dataset[["voxels"]])
-        
+        self.voxels_mean = (self.voxels_mean - self.voxels_min) / (self.voxels_max - self.voxels_min)
+        self.voxels_std = self.voxels_std / (self.voxels_max - self.voxels_min)
+        self.age_mean = (self.age_mean - self.age_min) / (self.age_max - self.age_min)
+        self.age_std = self.age_std / (self.age_max - self.age_min)
+
+        self.dataset["age"] = self.normalize_age(self.dataset["age"])
+
+        self.dataset.drop(columns=["avg_voxels"], inplace=True)
+
         if verbose:
             self.print_stats()
-        
-        if self.compute_prev_scans:
-            prev_scans = []
-            for _, scan in self.dataset.iterrows():
-                prev_scans.append(self._get_previous_scans(scan["pid"], scan["age"], add_noise=False))
-            self.dataset["prev_scans"] = prev_scans
     
-    def _get_avg_voxels(self, raster, tbv, voxel_vol):
+    def _get_voxel_range(self, raster, tbv, voxel_vol):
         original_voxels = tbv / voxel_vol
 
-        cropped_side_len = self._crop_raster(raster, return_shape_only=True, force_crop_factor=self.crop_factor)[0]
+        cropped_side_len = self._reshape_raster(raster, return_shape_only=True, force_crop_factor=self.crop_factor)[0]
         resize_factor = self.side_len / cropped_side_len
         cropped_voxel_vol = voxel_vol / resize_factor
         
         cropped_voxels = tbv / cropped_voxel_vol
 
-        return (original_voxels + cropped_voxels) / 2
+        return original_voxels, cropped_voxels
         
-    
-    def _crop_raster(self, raster, return_shape_only=False, force_crop_factor=None):
-        if force_crop_factor is None:
-            crop_shape = (raster.shape * np.random.uniform(self.crop_factor, 1.0, size=3) * (1, np.random.uniform(self.crop_factor, 1.0), 1)).astype(int)
-        else:
-            crop_shape = (raster.shape * (force_crop_factor, force_crop_factor**2, force_crop_factor)).astype(int)
-            
-        max_value = np.max(crop_shape.shape)
-        pad_shape = (max_value, max_value, max_value)
+    def _reshape_raster(self, raster, return_shape_only=False, force_crop_factor=None, no_crop=False):
+        # Crop the raster randomly and then pad it to be a cube. No deformation.
 
+        if no_crop:
+            max_value = np.max(raster.shape)
+        else:
+            if force_crop_factor is None:
+                crop_factor = np.random.uniform(self.crop_factor, 1.0, size=3)
+                crop_factor[2] *= np.random.uniform(self.crop_factor, 1.0) # The y axis usually has more unused space. Crop further.
+                crop_shape = (raster.shape[1:] * crop_factor).astype(int)
+            else:
+                crop_shape = (raster.shape[1:] * np.array([force_crop_factor, force_crop_factor**2, force_crop_factor])).astype(int)        
+            max_value = np.max(crop_shape)
+        
+        pad_shape = (max_value, max_value, max_value)
         if return_shape_only: return pad_shape
         
-        crop = tio.CropOrPad(target_shape=crop_shape)
-        pad = tio.CropOrPad(target_shape=pad_shape)
-        
-        return pad(crop(np.expand_dims(raster, axis=0))).squeeze()
+        if no_crop: 
+            pad = tio.CropOrPad(target_shape=pad_shape)
+            return pad(raster)
+        else:
+            crop = tio.CropOrPad(target_shape=crop_shape)
+            pad = tio.CropOrPad(target_shape=pad_shape)
     
-    def _prepare_raster(self, raster, voxel_spacings, tbv):
-        old_sizes = np.array(raster.shape)
-        old_spacings = voxel_spacings
-        new_sizes = self.side_len
+            return pad(crop(raster))
         
-        total_volume = np.prod(old_sizes) * np.prod(old_spacings)
-        
-        if np.array_equal(old_sizes, new_sizes):
-            return raster, voxel_spacings, round(tbv * np.prod(new_sizes) / total_volume, 2)
-        
-        resize_factors = new_sizes / old_sizes
+    def _prep_raster(self, raster, voxel_vol, new_side_len=100, no_crop=False):
+        original_raster = self._reshape_raster(raster, no_crop=no_crop)
+        original_side_len = original_raster.shape[-1]
+        original_voxel_vol = voxel_vol
 
-        raster = scipy.ndimage.zoom(raster, resize_factors)
-        new_spacings = old_spacings / resize_factors
-
-        return raster, new_spacings
-    
-    def _get_previous_scans(self, pid, age, add_noise=False):
-        prev_scans = self.get_previous_scan_metadata(pid, age, self.prev_scans_n)
-        n_features = self.prev_scans_n if self.prev_scans_no_age else self.prev_scans_n*2
-
-        if prev_scans is None:
-            return np.zeros((n_features))
+        if np.array_equal(original_side_len, new_side_len):
+            return original_raster, original_voxel_vol
         
-        if self.prev_scans_no_age:  prev_scans = prev_scans[['voxels']].to_numpy().flatten()
-        else:                       prev_scans = prev_scans[['voxels', 'age']].to_numpy().flatten()
-        
-        if add_noise:
-            prev_scans[['voxels']] += np.random.normal(0, 0.05, prev_scans[['voxels']].shape)
+        # Resize the raster to be a cube of side length new_side_len
+        resize_factor = new_side_len / original_side_len
 
-        prev_scans = np.pad(prev_scans, (0, n_features - len(prev_scans)), 'constant', constant_values=0)
-        
-        return prev_scans
+        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor))).unsqueeze(0)
+        new_voxel_vol = original_voxel_vol / resize_factor
+
+        return new_raster, new_voxel_vol
 
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, index):
-        return self.dataset.iloc[index]
+    def get(self, idx, no_crop=False):
+        item = self.dataset.iloc[idx]
+        raster, voxel_vol = self._prep_raster(item["raster"], item["voxel_vol"], new_side_len=self.side_len, no_crop=no_crop)
+        voxel_count = self.normalize_voxels(item["tbv"] / voxel_vol)
+
+        item = {
+            "age": item["age"],
+            "tbv": item["tbv"],
+            "voxel_vol": voxel_vol,
+            "voxels": voxel_count,
+            "raster": raster
+        }
+
+        return item
 
     def print_stats(self):
         print("Label standardization parameters:")
-        print(f"Voxels min: {self.voxels_minmax.data_min_}, max: {self.voxels_minmax.data_max_}")
-        print(f"Voxels mean: {self.voxels_std.mean_}, std: {self.voxels_std.scale_}")
+        print(f"Voxels min: {self.voxels_min:.2f}, max: {self.voxels_max:.2f}")
+        print(f"Voxels mean: {self.voxels_mean:.2f}, std: {self.voxels_std:.2f}")
         print()
-        print(f"Age min: {self.age_minmax.data_min_}, max: {self.age_minmax.data_max_}")
-        print(f"Age mean: {self.age_std.mean_}, std: {self.age_std.scale_}")
+        print(f"Age min: {self.age_min:.2f}, max: {self.age_max:.2f}")
+        print(f"Age mean: {self.age_mean:.2f}, std: {self.age_std:.2f}")
         print()
 
     def get_unique_pids(self):
@@ -148,53 +173,30 @@ class RawDataset:
 
     def get_indices_from_pids(self, pids):
         return self.dataset[self.dataset["pid"].isin(pids)].index
-    
-    def get_previous_scan_metadata(self, pid, age, n=3):
-        previous_scans = self.dataset[(self.dataset["pid"] == pid) & (self.dataset["age"] < age)].sort_values("age", ascending=False)
-        if self.prev_scans_age_as_diff: previous_scans["age"] = previous_scans["age"] - age
-        return previous_scans.iloc[:n].drop(columns=["raster"]) if len(previous_scans) > 0 else None
+
+    def normalize_voxels(self, voxels, inverse=False):
+        if inverse:
+            voxels = voxels * self.voxels_std + self.voxels_mean
+            voxels = voxels * (self.voxels_max - self.voxels_min) + self.voxels_min
+        else:
+            voxels = (voxels - self.voxels_min) / (self.voxels_max - self.voxels_min)
+            voxels = (voxels - self.voxels_mean) / self.voxels_std
+        
+        return voxels
+
+    def normalize_age(self, age, inverse=False):
+        if inverse:
+            age = age * self.age_std + self.age_mean
+            age = age * (self.age_max - self.age_min) + self.age_min
+        else:
+            age = (age - self.age_min) / (self.age_max - self.age_min)
+            age = (age - self.age_mean) / self.age_std
+        
+        return age
     
 class RasterDataset(Dataset):
-    def __init__(self, dataset, histogram_bins=None, drop_zero_bin=True):
-        self.dataset = dataset
-        self.histogram_bins = histogram_bins
-        self.drop_zero_bin = drop_zero_bin
-
-        if self.histogram_bins is not None:
-            self.intensity_transform = tio.transforms.RescaleIntensity()
-            self.znorm_transform = tio.transforms.ZNormalization()
-
-            if self.drop_zero_bin:
-                self.histogram_bins += 1
-            
-    def _get_histogram(self, raster):
-        raster = raster.squeeze(0).numpy()
-
-        kernels = np.lib.stride_tricks.sliding_window_view(np.pad(raster, 1), (3, 3, 3))
-        hist = self._histogram_from_kernels(kernels, self.histogram_bins, self.drop_zero_bin)
-
-        # Reshape to (bins, side_len, side_len, side_len)
-        hist = torch.from_numpy(np.stack(np.split(hist, hist.shape[3], axis=3), axis=0).squeeze())
-        
-        # Normalize histogram
-        hist = self.intensity_transform(hist)
-        hist = self.znorm_transform(hist)
-
-        return hist
-
-    @staticmethod
-    @jit(nopython=True) 
-    def _histogram_from_kernels(kernels, bins, drop_zero_bin=True):
-        # Using numba to speed up the triple loop
-
-        hist = np.zeros((kernels.shape[0], kernels.shape[1], kernels.shape[2], bins))
-
-        for i in range(kernels.shape[0]):
-            for j in range(kernels.shape[1]):
-                for k in range(kernels.shape[2]):
-                    hist[i, j, k, :] = np.histogram(kernels[i, j, k], bins=bins, range=(0, 255))[0]
-        
-        return hist[:, :, :, 1:] if drop_zero_bin else hist
+    def __init__(self, raw_dataset):
+        self.raw_dataset = raw_dataset
 
     def get_unique_pids(self):
         return self.raw_dataset.get_unique_pids()
@@ -202,19 +204,25 @@ class RasterDataset(Dataset):
     def get_indices_from_pids(self, pids):
         return self.raw_dataset.get_indices_from_pids(pids)
 
+    def normalize_voxels(self, voxels, inverse=False):
+        return self.raw_dataset.normalize_voxels(voxels, inverse)
+    
+    def normalize_age(self, age, inverse=False):
+        return self.raw_dataset.normalize_age(age, inverse)
+    
 class TrainDataset(RasterDataset):
-    def __init__(self, raw_dataset, pids, histogram_bins=None, drop_zero_bin=True):
-        super().__init__(raw_dataset, histogram_bins, drop_zero_bin)
+    def __init__(self, raw_dataset, pids, verbose=True):
+        super().__init__(raw_dataset)
 
         self.pid_set = set(pids)
-        self.volumes = self.dataset.get_indices_from_pids(pids)
+        self.volumes = self.raw_dataset.get_indices_from_pids(pids)
 
         self.transform = tio.Compose([
-            tio.transforms.RandomAffine(scales=0, degrees=10, translation=0.2, default_pad_value='minimum', p=0.25),
-            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
-            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
-            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.2),
-            tio.transforms.RandomBlur(std=0.1, p=0.2),
+            tio.transforms.RandomAffine(scales=0, degrees=20, translation=0.2, default_pad_value='minimum', p=0.25),
+            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.15),
+            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.15),
+            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.15),
+            tio.transforms.RandomBlur(std=0.1, p=0.15),
             tio.transforms.RandomBiasField(p=0.01),
             tio.transforms.RandomMotion(num_transforms=2, p=0.01),
             tio.transforms.RandomGhosting(num_ghosts=2, p=0.01),
@@ -229,44 +237,32 @@ class TrainDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        entry = self.dataset[self.volumes[idx]]
+        # Randomly crop 70% of the time
+        entry = self.raw_dataset.get(self.volumes[idx], no_crop=(np.random.uniform() > 0.7))
         raster = self.transform(entry["raster"])
 
-        if self.histogram_bins is not None:
-            raster = self._get_histogram(raster)
-
         return {
-            "pid": entry["pid"], 
             "age": entry["age"], 
-            "tbv": entry["tbv"], 
-            "voxels": entry["voxels"], 
-            "voxel_volume": entry["voxel_volume"], 
-            "raster": raster,
-            "prev_scans": entry["prev_scans"] if "prev_scans" in entry else None
+            "tbv": entry["tbv"],  
+            "voxel_vol": entry["voxel_vol"], 
+            "voxels": entry["voxels"],
+            "raster": raster
         }
-
     
 class ValDataset(RasterDataset):
-    def __init__(self, raw_dataset, pids, histogram_bins=None, drop_zero_bin=True):
-        super().__init__(raw_dataset, histogram_bins, drop_zero_bin)
+    def __init__(self, raw_dataset, pids, verbose=True):
+        super().__init__(raw_dataset)
 
         self.pid_set = set(pids)
-        self.volumes = self.dataset.get_indices_from_pids(pids)
+        self.volumes = self.raw_dataset.get_indices_from_pids(pids)
         
-        # Rasters can be preprocessed bc they won't be transformed
-        # TODO: Add multiprocessing not to wait 15 seconds...
+        if verbose: print("Preprocessing validation data...")
+        
         self.preprocessed_rasters = {}
         for idx in self.volumes:
-            self._preprocess_raster(idx)
-
-    def _preprocess_raster(self, idx):
-        entry = self.dataset[idx]
-        raster = entry["raster"]
-
-        if self.histogram_bins is not None:
-            raster = self._get_histogram(raster)
-
-        self.preprocessed_rasters[idx] = raster
+            self.preprocessed_rasters[idx] = self.raw_dataset.get(idx, no_crop=True)
+        
+        if verbose: print("Done preprocessing validation data.")
 
     def __len__(self):
         return len(self.volumes)
@@ -275,18 +271,14 @@ class ValDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        idx = self.volumes[idx]
-        entry = self.dataset[idx]
-        raster = self.preprocessed_rasters[idx]
+        entry = self.preprocessed_rasters[self.volumes[idx]]
 
         return {
-            "pid": entry["pid"], 
             "age": entry["age"], 
-            "tbv": entry["tbv"], 
-            "voxels": entry["voxels"], 
-            "voxel_volume": entry["voxel_volume"], 
-            "raster": raster,
-            "prev_scans": entry["prev_scans"] if "prev_scans" in entry else None
+            "tbv": entry["tbv"],  
+            "voxel_vol": entry["voxel_vol"],
+            "voxels": entry["voxels"],
+            "raster": entry["raster"]
         }
 
 class EarlyStopper:
@@ -350,7 +342,6 @@ class TrainMode(Enum):
     NO_AGE = 0
     IN_AGE = 1
     OUT_AGE = 2
-    PREV_SCANS = 3
 
 def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stopper, train_mode, 
                   num_epochs, device, dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0), 
@@ -378,9 +369,6 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
             
             if train_mode != TrainMode.NO_AGE:
                 ages = data["age"].float().to(device)
-            
-            if train_mode == TrainMode.PREV_SCANS:
-                prev_scans = data["prev_scans"].float().to(device)
                 
             optimizer.zero_grad()
             
@@ -394,9 +382,6 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                 ground = torch.dstack((voxels, ages)).squeeze()
                 predictions = model(rasters).squeeze()
                 loss = criterion(predictions, ground)
-            elif train_mode == TrainMode.PREV_SCANS:
-                predictions = model(rasters, ages.unsqueeze(1), prev_scans).squeeze()
-                loss = criterion(predictions, voxels)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip) # Avoid exploding gradients
@@ -419,9 +404,6 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                 
                 if train_mode != TrainMode.NO_AGE:
                     ages = data["age"].float().to(device)
-                
-                if train_mode == TrainMode.PREV_SCANS:
-                    prev_scans = data["prev_scans"].float().to(device)
 
                 if train_mode == TrainMode.NO_AGE:
                     predictions = model(rasters).squeeze()
@@ -433,9 +415,6 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
                     ground = torch.dstack((voxels, ages)).squeeze()
                     predictions = model(rasters).squeeze()
                     loss = criterion(predictions, ground)
-                elif train_mode == TrainMode.PREV_SCANS:
-                    predictions = model(rasters, ages.unsqueeze(1), prev_scans).squeeze()
-                    loss = criterion(predictions, voxels)
 
                 validation_loss += loss.item()
 
@@ -468,9 +447,6 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
             
             if train_mode != TrainMode.NO_AGE:
                 ages = data["age"].float().reshape(-1, 1)
-
-            if train_mode == TrainMode.PREV_SCANS:
-                prev_scans = data["prev_scans"].float().to(device)
             
             if train_mode == TrainMode.NO_AGE:
                 pred_voxels = model(rasters).squeeze().cpu()
@@ -481,23 +457,17 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
                 predictions = model(rasters).squeeze().cpu()
                 pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
                 pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
-            elif train_mode == TrainMode.PREV_SCANS:
-                pred_voxels = model(rasters, ages.to(device), prev_scans).squeeze().cpu()
-                ages = ages.cpu()
             
             pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
-            
-            # Revert the normalization and standardization
-            pred_voxels = raw_dataset.voxels_std.inverse_transform(pred_voxels)
-            pred_voxels = raw_dataset.voxels_minmax.inverse_transform(pred_voxels)
+            pred_voxels = raw_dataset.normalize_voxels(pred_voxels, inverse=True)
             
             if train_mode == TrainMode.OUT_AGE:
-                pred_ages = raw_dataset.age_std.inverse_transform(pred_ages)
-                pred_ages = raw_dataset.age_minmax.inverse_transform(pred_ages)
-                ages = raw_dataset.age_std.inverse_transform(ages)
-                ages = raw_dataset.age_minmax.inverse_transform(ages)
-                
-            pred_tbvs = pred_voxels * data["voxel_volume"].numpy().reshape(-1, 1)
+                pred_ages = raw_dataset.normalize_ages(pred_ages, inverse=True)
+                ages = raw_dataset.normalize_ages(ages, inverse=True)
+            
+            dummy_std_voxels = raw_dataset.normalize_voxels(data['voxels'].float().numpy().reshape(-1, 1), inverse=True)
+
+            pred_tbvs = pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1)
 
             tbv_diffs = np.abs(pred_tbvs - tbvs)
             all_diffs_tbv.append(tbv_diffs)
@@ -533,9 +503,9 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
         return avg_diff_tbv, std_diff_tbv
 
 def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
-        optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, early_stop_ignore_first_epochs= 100, 
-        batch_size=8, data_workers=4, trace_func=print, scheduler_class=None, scheduler_params={}, k_fold=6, 
-        histogram_bins=None, drop_zero_bin=False, grad_clip=5, override_val_pids=None,
+        optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, 
+        early_stop_ignore_first_epochs= 100,  batch_size=8, data_workers=4, trace_func=print, 
+        scheduler_class=None, scheduler_params={}, k_fold=6, grad_clip=5, override_val_pids=None,
         dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0)):
 
     # Save model to reset it after each fold
@@ -585,8 +555,8 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
             val_pids = unique_pids[val_indices]
             train_pids = unique_pids[train_indices]
         
-        train_set = TrainDataset(raw_dataset, train_pids, histogram_bins=histogram_bins, drop_zero_bin=drop_zero_bin)
-        val_set = ValDataset(raw_dataset, val_pids, histogram_bins=histogram_bins, drop_zero_bin=drop_zero_bin)
+        train_set = TrainDataset(raw_dataset, train_pids)
+        val_set = ValDataset(raw_dataset, val_pids)
 
         trace_func(f"Train volumes: {len(train_set)}")
         trace_func(f"Validation volumes: {len(val_set)}")
