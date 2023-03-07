@@ -107,7 +107,7 @@ class RawDataset:
         else:
             if force_crop_factor is None:
                 crop_factor = np.random.uniform(self.crop_factor, 1.0, size=3)
-                crop_factor[2] *= np.random.uniform(self.crop_factor, 1.0) # The y axis usually has more unused space. Crop further.
+                #crop_factor[2] *= np.random.uniform(self.crop_factor, 1.0) # The y axis usually has more unused space. Crop further.
                 crop_shape = (raster.shape[1:] * crop_factor).astype(int)
             else:
                 crop_shape = (raster.shape[1:] * np.array([force_crop_factor, force_crop_factor**2, force_crop_factor])).astype(int)        
@@ -136,7 +136,7 @@ class RawDataset:
         # Resize the raster to be a cube of side length new_side_len
         resize_factor = new_side_len / original_side_len
 
-        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor))).unsqueeze(0)
+        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
         new_voxel_vol = original_voxel_vol / resize_factor
 
         return new_raster, new_voxel_vol
@@ -211,23 +211,31 @@ class RasterDataset(Dataset):
         return self.raw_dataset.normalize_age(age, inverse)
     
 class TrainDataset(RasterDataset):
-    def __init__(self, raw_dataset, pids, verbose=True):
+    def __init__(self, raw_dataset, pids, verbose=True, crop_chance=0.3):
         super().__init__(raw_dataset)
 
         self.pid_set = set(pids)
         self.volumes = self.raw_dataset.get_indices_from_pids(pids)
+        self.crop_chance = crop_chance
 
         self.transform = tio.Compose([
-            tio.transforms.RandomAffine(scales=0, degrees=20, translation=0.2, default_pad_value='minimum', p=0.25),
+            tio.OneOf({
+                tio.transforms.RandomAffine(scales=0, degrees=15, translation=0, default_pad_value='minimum'): 0.8,
+                tio.transforms.RandomAffine(scales=0, degrees=90, translation=0, default_pad_value='minimum'): 0.2
+            }, p=0.8),
             tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.15),
             tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.15),
-            tio.transforms.RandomNoise(mean=0, std=0.1, p=0.15),
-            tio.transforms.RandomBlur(std=0.1, p=0.15),
-            tio.transforms.RandomBiasField(p=0.01),
-            tio.transforms.RandomMotion(num_transforms=2, p=0.01),
-            tio.transforms.RandomGhosting(num_ghosts=2, p=0.01),
-            tio.transforms.RandomSwap(p=0.01),
-            tio.transforms.RandomSpike(p=0.01)
+            tio.OneOf({
+                tio.transforms.RandomNoise(mean=0, std=0.1),
+                tio.transforms.RandomBlur(std=0.1)
+            }, p=0.15),
+            tio.OneOf({
+                tio.transforms.RandomBiasField(),
+                tio.transforms.RandomMotion(num_transforms=2),
+                tio.transforms.RandomGhosting(num_ghosts=2),
+                tio.transforms.RandomSwap(),
+                tio.transforms.RandomSpike()
+            }, p=0.03)
         ])
 
     def __len__(self):
@@ -237,8 +245,7 @@ class TrainDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        # Randomly crop 70% of the time
-        entry = self.raw_dataset.get(self.volumes[idx], no_crop=(np.random.uniform() > 0.7))
+        entry = self.raw_dataset.get(self.volumes[idx], no_crop=(np.random.uniform() > self.crop_chance))
         raster = self.transform(entry["raster"])
 
         return {
