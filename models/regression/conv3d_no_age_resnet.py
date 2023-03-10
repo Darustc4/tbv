@@ -42,19 +42,18 @@ class ResidualBlock(nn.Module):
 class RasterNet(nn.Module):
     def __init__(self, block, layers):
         super(RasterNet, self).__init__()
-        self.inplanes = 32
+        self.inplanes = 64
 
         self.conv0 = nn.Sequential(
-            nn.Conv3d(1, 32, kernel_size=7, stride=2, padding=3),
-            nn.BatchNorm3d(32),
+            nn.Conv3d(1, 64, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm3d(64),
             nn.ReLU()
         )
 
-        self.layer0 = self._make_layer(block, 32, layers[0], stride=2)
-        self.layer1 = self._make_layer(block, 64, layers[1], stride=2)
-        self.layer2 = self._make_layer(block, 128, layers[2], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[3], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[4], stride=2)
+        self.layer0 = self._make_layer(block, 64, layers[0], stride=2)
+        self.layer1 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer2 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer3 = self._make_layer(block, 512, layers[3], stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
 
@@ -89,7 +88,6 @@ class RasterNet(nn.Module):
         if self.enable_dropblock: x = ops.drop_block3d(x, block_size=3, p=self.do.p, training=self.training)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
@@ -104,8 +102,8 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=128, crop_factor=0.75)
-    model = RasterNet(ResidualBlock, [2, 3, 5, 4, 2]).to(cuda)
+    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, crop_factor=0.75, crop_chance=0.3)
+    model = RasterNet(ResidualBlock, [2, 3, 4, 2]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 

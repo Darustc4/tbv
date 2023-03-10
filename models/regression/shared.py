@@ -14,10 +14,11 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class RawDataset:
-    def __init__(self, data_dir, side_len=96, crop_factor=0.8, verbose=True):
+    def __init__(self, data_dir, side_len=96, crop_factor=0.8, crop_chance=0.3, verbose=True):
         self.data_dir = data_dir
         self.side_len = side_len
         self.crop_factor = crop_factor
+        self.crop_chance = crop_chance
 
         intensity_transform = tio.transforms.RescaleIntensity()
         znorm_transform = tio.transforms.ZNormalization()
@@ -145,6 +146,8 @@ class RawDataset:
         return len(self.dataset)
 
     def get(self, idx, no_crop=False):
+        no_crop = no_crop or (np.random.uniform() > self.crop_chance)
+
         item = self.dataset.iloc[idx]
         raster, voxel_vol = self._prep_raster(item["raster"], item["voxel_vol"], new_side_len=self.side_len, no_crop=no_crop)
         voxel_count = self.normalize_voxels(item["tbv"] / voxel_vol)
@@ -211,12 +214,11 @@ class RasterDataset(Dataset):
         return self.raw_dataset.normalize_age(age, inverse)
     
 class TrainDataset(RasterDataset):
-    def __init__(self, raw_dataset, pids, verbose=True, crop_chance=0.3):
+    def __init__(self, raw_dataset, pids, verbose=True):
         super().__init__(raw_dataset)
 
         self.pid_set = set(pids)
         self.volumes = self.raw_dataset.get_indices_from_pids(pids)
-        self.crop_chance = crop_chance
 
         self.transform = tio.Compose([
             tio.OneOf({
@@ -245,7 +247,7 @@ class TrainDataset(RasterDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        entry = self.raw_dataset.get(self.volumes[idx], no_crop=(np.random.uniform() > self.crop_chance))
+        entry = self.raw_dataset.get(self.volumes[idx], no_crop=False)
         raster = self.transform(entry["raster"])
 
         return {
@@ -471,9 +473,7 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
             if train_mode == TrainMode.OUT_AGE:
                 pred_ages = raw_dataset.normalize_ages(pred_ages, inverse=True)
                 ages = raw_dataset.normalize_ages(ages, inverse=True)
-            
-            dummy_std_voxels = raw_dataset.normalize_voxels(data['voxels'].float().numpy().reshape(-1, 1), inverse=True)
-
+          
             pred_tbvs = pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1)
 
             tbv_diffs = np.abs(pred_tbvs - tbvs)

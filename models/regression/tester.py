@@ -1,6 +1,7 @@
 import json
 import os
 import nrrd
+import scipy
 import numpy as np
 import pandas as pd
 import argparse
@@ -15,19 +16,17 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, pids, std_params={}, use_age=False, output_noise=False):
+    def __init__(self, data_dir, pids, side_len=96, crop_factor=0.8, crop_chance=0.3, std_params={}, use_age=False, output_noise=False):
         self.data_dir = data_dir
         self.pids = pids
+        self.side_len = side_len
+        self.crop_factor = crop_factor
+        self.crop_chance = crop_chance
         self.use_age = use_age
         self.output_noise = output_noise
 
-        try:
-            self.histogram_bins = std_params["histogram_bins"]
-            self.drop_zero_bin = std_params["drop_zero_bin"]
-            if self.drop_zero_bin: self.histogram_bins += 1
-        except KeyError as e:
-            self.histogram_bins = None
-            self.drop_zero_bin = False
+        intensity_transform = tio.transforms.RescaleIntensity()
+        znorm_transform = tio.transforms.ZNormalization()
 
         self.voxels_min = std_params["voxels_min"]
         self.voxels_max = std_params["voxels_max"]
@@ -51,43 +50,92 @@ class Dataset(torch.utils.data.Dataset):
                     raster, headers = nrrd.read(os.path.join(data_dir, file))
 
                 tensor = torch.from_numpy(raster).unsqueeze(0)
-                tensor = self._get_histogram(tensor) if self.histogram_bins else tensor
+                tensor = intensity_transform(tensor)
+                tensor = znorm_transform(tensor)
+
+                voxel_volume = np.prod(headers["spacings"])
+                tbv = float(headers["tbv"])
+                age = int(headers["age_days"])
 
                 data.append({
-                    "pid": os.path.splitext(file)[0].split("_")[0],
-                    "age": headers["age_days"],
-                    "tbv": headers["tbv"],
-                    "voxels": headers["tbv_n_voxels"],
-                    "voxel_volume": np.prod(headers["spacings"]),
+                    "pid": pid,
+                    "age": age,
+                    "tbv": tbv,
+                    "voxel_volume": voxel_volume,
                     "raster": tensor
                 })
 
-        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "voxels", "voxel_volume", "raster"], data=data)
-        self.dataset[["age", "tbv", "voxels", "voxel_volume"]] = self.dataset[["age", "tbv", "voxels", "voxel_volume"]].apply(pd.to_numeric)
+        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "voxel_volume", "raster"], data=data)
+        self.dataset[["age", "tbv", "voxel_volume"]] = self.dataset[["age", "tbv", "voxel_volume"]].apply(pd.to_numeric)
 
-        self.dataset["voxels"] = self.normalize_voxels(self.dataset["voxels"])
         if self.use_age:
             self.dataset["age"] = self.normalize_age(self.dataset["age"])
 
     def __len__(self):
         return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
-        entry = self.dataset.iloc[idx]
         
-        item = {
-            "pid": entry["pid"], 
-            "tbv": entry["tbv"], 
-            "voxels": entry["voxels"], 
-            "voxel_volume": entry["voxel_volume"], 
-            "raster": entry["raster"]
-        }
+    def _reshape_raster(self, raster, return_shape_only=False, force_crop_factor=None, no_crop=False):
+        # Crop the raster randomly and then pad it to be a cube. No deformation.
 
-        if self.use_age:
-            item["age"] = entry["age"]
+        if no_crop:
+            max_value = np.max(raster.shape)
+        else:
+            if force_crop_factor is None:
+                crop_factor = np.random.uniform(self.crop_factor, 1.0, size=3)
+                #crop_factor[2] *= np.random.uniform(self.crop_factor, 1.0) # The y axis usually has more unused space. Crop further.
+                crop_shape = (raster.shape[1:] * crop_factor).astype(int)
+            else:
+                crop_shape = (raster.shape[1:] * np.array([force_crop_factor, force_crop_factor**2, force_crop_factor])).astype(int)        
+            max_value = np.max(crop_shape)
+        
+        pad_shape = (max_value, max_value, max_value)
+        if return_shape_only: return pad_shape
+        
+        if no_crop: 
+            pad = tio.CropOrPad(target_shape=pad_shape)
+            return pad(raster)
+        else:
+            crop = tio.CropOrPad(target_shape=crop_shape)
+            pad = tio.CropOrPad(target_shape=pad_shape)
+    
+            return pad(crop(raster))
+        
+    def _prep_raster(self, raster, voxel_volume, new_side_len=100, no_crop=False):
+        original_raster = self._reshape_raster(raster, no_crop=no_crop)
+        original_side_len = original_raster.shape[-1]
+        original_voxel_volume = voxel_volume
+
+        if np.array_equal(original_side_len, new_side_len):
+            return original_raster, original_voxel_volume
+        
+        # Resize the raster to be a cube of side length new_side_len
+        resize_factor = new_side_len / original_side_len
+
+        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
+        new_voxel_volume = original_voxel_volume / resize_factor
+
+        return new_raster, new_voxel_volume
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def set_no_crop(self, no_crop):
+        self.no_crop = no_crop
+
+    def __getitem__(self, idx):
+        no_crop = self.no_crop or (np.random.uniform() > self.crop_chance)
+
+        item = self.dataset.iloc[idx]
+        raster, voxel_volume = self._prep_raster(item["raster"], item["voxel_volume"], new_side_len=self.side_len, no_crop=no_crop)
+        voxel_count = self.normalize_voxels(item["tbv"] / voxel_volume)
+
+        item = {
+            "age": item["age"],
+            "tbv": item["tbv"],
+            "voxel_volume": voxel_volume,
+            "voxels": voxel_count,
+            "raster": raster
+        }
 
         return item
 
@@ -110,45 +158,17 @@ class Dataset(torch.utils.data.Dataset):
             age = age * (self.age_max - self.age_min) + self.age_min
 
         return age
-    
-    def _get_histogram(self, raster):
-        raster = raster.squeeze(0).numpy()
 
-        kernels = np.lib.stride_tricks.sliding_window_view(np.pad(raster, 1), (3, 3, 3))
-        hist = self._histogram_from_kernels(kernels, self.histogram_bins, self.drop_zero_bin)
-
-        # Reshape to (bins, side_len, side_len, side_len)
-        hist = torch.from_numpy(np.stack(np.split(hist, hist.shape[3], axis=3), axis=0).squeeze())
-        
-        # Normalize histogram
-        hist = self.intensity_transform(hist)
-        hist = self.znorm_transform(hist)
-
-        return hist
-
-    @staticmethod
-    @jit(nopython=True) 
-    def _histogram_from_kernels(kernels, bins, drop_zero_bin=True):
-        # Using numba to speed up the triple loop
-
-        hist = np.zeros((kernels.shape[0], kernels.shape[1], kernels.shape[2], bins))
-
-        for i in range(kernels.shape[0]):
-            for j in range(kernels.shape[1]):
-                for k in range(kernels.shape[2]):
-                    hist[i, j, k, :] = np.histogram(kernels[i, j, k], bins=bins, range=(0, 255))[0]
-        
-        return hist[:, :, :, 1:] if drop_zero_bin else hist
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(type=str, dest="model_name", help="Name of the model to test (simple, resnet, hist, bayes)")
+    parser.add_argument(type=str, dest="model_name", help="Name of the model to test (simple, resnet)")
     parser.add_argument("--use_age", action="store_true", help="Use age in the model")
     parser.add_argument("--skip_bayesian", action="store_true", help="Skip bayesian dropout")
     parser.add_argument("--use_latest", action="store_true", help="Use latest weights instead of best")
     parser.add_argument("--mode", type=str, default="lenient", help="Refuse raster option (lenient, normal, strict)")
     parser.add_argument("--bayes_runs", type=int, default=10, help="Number of times to estimate each sample")
-    parser.add_argument("--data_dir", type=str, default="../dataset", help="Path to the dataset directory")
+    parser.add_argument("--data_dir", type=str, default="./dataset", help="Path to the dataset directory")
     parser.add_argument("--weights_dir", type=str, default="./weights", help="Path to the weights directory")
     parser.add_argument("--noise", action="store_true", help="Use noise instead of proper rasters")
 
@@ -166,23 +186,16 @@ if __name__ == "__main__":
     if args.model_name == "simple":
         from conv3d_no_age_simple import RasterNet
         model = RasterNet()
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
-
     elif args.model_name == "resnet":
         from conv3d_no_age_resnet import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [3, 3, 4, 4])
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
-
-    elif args.model_name == "hist":
-        from conv3d_no_age_hist import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [2, 2, 2, 2])
-        dataset = Dataset(data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise)
-
-    elif args.model_name == "bayes":
-        pass
-        #from conv3d_no_age_bayesian import RasterNet
+        model = RasterNet(ResidualBlock, [2, 3, 5, 4, 2])
     else:
         raise ValueError("Invalid model name")
+
+    dataset = Dataset(
+        data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise, 
+        side_len=128, crop_factor=0.85, crop_chance=0.75
+    )
 
     if args.mode == "lenient":     refuse_threshold = 0.18
     elif args.mode == "normal":    refuse_threshold = 0.12
@@ -203,24 +216,20 @@ if __name__ == "__main__":
     eval_all_diffs = []
     eval_all_tbvs = []
     transforms = tio.Compose([
-        tio.transforms.RandomAffine(scales=0, degrees=20, translation=0.25, default_pad_value='minimum', p=0.8),
+        tio.transforms.RandomAffine(scales=0, degrees=20, translation=0, default_pad_value='minimum', p=0.8),
         tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.3),
         tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
         tio.transforms.RandomNoise(mean=0, std=0.15, p=0.3),
         tio.transforms.RandomBlur(std=0.15, p=0.3)
     ])
 
+    dataset.set_no_crop(True)
     with torch.no_grad():
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float()
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
-
-            trf_rasters = torch.zeros(rasters.shape)
-            for j in range(rasters.shape[0]):
-                trf_rasters[j] = znorm_transform(intensity_transform(tio.ScalarImage(tensor=rasters[j]))).tensor
-
-            predictions = model(trf_rasters).squeeze().reshape(-1, 1)
-
+            
+            predictions = model(rasters).squeeze().reshape(-1, 1)
             predictions = dataset.normalize_voxels(predictions, inverse=True)
             predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
 
@@ -240,6 +249,7 @@ if __name__ == "__main__":
         
         refused_raster_count = 0
 
+        dataset.set_no_crop(True)
         with torch.no_grad():
             for i, data in enumerate(dataloader):
                 rasters = data["raster"].float()
