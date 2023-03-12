@@ -188,18 +188,18 @@ if __name__ == "__main__":
         model = RasterNet()
     elif args.model_name == "resnet":
         from conv3d_no_age_resnet import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [2, 3, 5, 4, 2])
+        model = RasterNet(ResidualBlock, [2, 3, 4, 2])
     else:
         raise ValueError("Invalid model name")
 
     dataset = Dataset(
         data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise, 
-        side_len=128, crop_factor=0.85, crop_chance=0.75
+        side_len=96, crop_factor=0.9, crop_chance=1.0
     )
 
-    if args.mode == "lenient":     refuse_threshold = 0.18
-    elif args.mode == "normal":    refuse_threshold = 0.12
-    elif args.mode == "strict":    refuse_threshold = 0.08
+    if args.mode == "lenient":     refuse_threshold = 12.0
+    elif args.mode == "normal":    refuse_threshold = 6.0
+    elif args.mode == "strict":    refuse_threshold = 3.0
     else: raise ValueError("Invalid mode")
 
     model.load_state_dict(torch.load(os.path.join(args.weights_dir, weights_file), map_location=torch.device('cpu')))
@@ -207,20 +207,19 @@ if __name__ == "__main__":
 
     batch_size = 8
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
-    
-    intensity_transform = tio.transforms.RescaleIntensity()
-    znorm_transform = tio.transforms.ZNormalization()
 
     print("Computing the mean and standard deviation of the test set for non-bayesian mode...")
 
     eval_all_diffs = []
     eval_all_tbvs = []
     transforms = tio.Compose([
-        tio.transforms.RandomAffine(scales=0, degrees=20, translation=0, default_pad_value='minimum', p=0.8),
+        tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.8),
         tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.3),
         tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
-        tio.transforms.RandomNoise(mean=0, std=0.15, p=0.3),
-        tio.transforms.RandomBlur(std=0.15, p=0.3)
+        tio.OneOf({
+            tio.transforms.RandomNoise(mean=0, std=0.1),
+            tio.transforms.RandomBlur(std=0.1)
+        }, p=0.3)
     ])
 
     dataset.set_no_crop(True)
@@ -247,49 +246,40 @@ if __name__ == "__main__":
         filtered_diffs = []
         bayes_all_diffs = []
         
+        diff_matrix = []
+
         refused_raster_count = 0
 
-        dataset.set_no_crop(True)
+        dataset.set_no_crop(False)
         with torch.no_grad():
-            for i, data in enumerate(dataloader):
-                rasters = data["raster"].float()
-                tbvs = data["tbv"].float().numpy().reshape(-1, 1)
+            for _ in range(args.bayes_runs):
+                run_diffs = []
+                for i, data in enumerate(dataloader):
 
-                all_predictions = []
-                for _ in range(args.bayes_runs):
+                    rasters = data["raster"].float()
+                    tbvs = data["tbv"].float().numpy().reshape(-1, 1)
+                    
                     trf_rasters = torch.zeros(rasters.shape)
                     for j in range(rasters.shape[0]):
-                        trf_rasters[j] = znorm_transform(intensity_transform(transforms(tio.ScalarImage(tensor=rasters[j])))).tensor
-                    
-                    predictions = model(trf_rasters).squeeze()
-                    all_predictions.append(predictions.detach().numpy())
-                
-                all_predictions = np.stack(all_predictions)
+                        trf_rasters[j] = transforms(rasters[j])
 
-                predictions = np.mean(all_predictions, axis=0).reshape(-1, 1)
-                error = np.std(all_predictions, axis=0).reshape(-1, 1)
+                    predictions = model(trf_rasters).squeeze().reshape(-1, 1)
+                    predictions = dataset.normalize_voxels(predictions, inverse=True)
+                    predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
+                    run_diffs.append(predicted_tbvs)
 
-                predictions = dataset.normalize_voxels(predictions, inverse=True)
-                predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
+                diff_matrix.append(np.array(np.concatenate(run_diffs)).squeeze())
 
-                #predicted_tbvs = (predicted_tbvs + eval_all_tbvs[i * batch_size:(i + 1) * batch_size]) / 2 # Option 1
-                predicted_tbvs = eval_all_tbvs[i * batch_size:(i + 1) * batch_size]                        # Option 2
-                #predicted_tbvs = predicted_tbvs                                                            # Option 3
-                
-                tbv_diffs = np.abs(predicted_tbvs - tbvs)
+            error = np.std(np.stack(diff_matrix), axis=0)
 
-                accepted_diffs = []
-                for j in range(len(tbvs)):
-                    if error[j][0] < refuse_threshold:
-                        accepted_diffs.append(tbv_diffs[j][0])
-                    else:
-                        refused_raster_count += 1
+            accepted_diffs = []
+            for i in range(len(error)):
+                if error[i] < refuse_threshold:
+                    accepted_diffs.append(eval_all_diffs[i][0])
+                else:
+                    refused_raster_count += 1
 
-                filtered_diffs.append(accepted_diffs)
-                bayes_all_diffs.append(tbv_diffs)     
-
-        filtered_diffs = np.concatenate(filtered_diffs)
-        bayes_all_diffs = np.concatenate(bayes_all_diffs)
+            filtered_diffs = np.array(accepted_diffs)
 
     big_diff_threshold = 30
     eval_all_big_diffs = [diff for diff in eval_all_diffs if diff > big_diff_threshold]
@@ -322,14 +312,6 @@ if __name__ == "__main__":
         if(len(bayes_all_accepted_big_diffs) > 0):
             print(f"Big error mean: {np.mean(bayes_all_accepted_big_diffs):.2f} cc")
             print(f"Big error std: {np.std(bayes_all_accepted_big_diffs):.2f} cc")
-        print()
-        print("Among all rasters:")
-        print(f"Mean Absolute Error: {np.mean(bayes_all_diffs):.2f} cc")
-        print(f"Standard Deviation: {np.std(bayes_all_diffs):.2f} cc")
-        print(f"Big error count (>{big_diff_threshold}): {len(bayes_all_big_diffs)}")
-        if (len(bayes_all_big_diffs) > 0):
-            print(f"Big error mean: {np.mean(bayes_all_big_diffs):.2f} cc")
-            print(f"Big error std: {np.std(bayes_all_big_diffs):.2f} cc")
         print("- - - - - -")
     
     

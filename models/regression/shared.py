@@ -56,9 +56,7 @@ class RawDataset:
             })
 
             if verbose:
-                print(f"Loaded {pid} with {lower_voxels:.2f} - {upper_voxels:.2f} voxels")
-                print(f"Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3")
-                print()
+                print(f"Loaded {pid} with {lower_voxels:.2f} - {upper_voxels:.2f} voxels. Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3.")
 
             self.voxels_min = min(self.voxels_min, lower_voxels)
             self.voxels_max = max(self.voxels_max, upper_voxels)
