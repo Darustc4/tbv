@@ -14,9 +14,11 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class RawDataset:
-    def __init__(self, data_dir, side_len=96, crop_factor=0.8, crop_chance=0.3, verbose=True):
+    def __init__(self, data_dir, side_len=96, no_crop=False, no_deform=True, crop_factor=0.8, crop_chance=0.3, verbose=True):
         self.data_dir = data_dir
         self.side_len = side_len
+        self.no_crop = no_crop
+        self.no_deform = no_deform
         self.crop_factor = crop_factor
         self.crop_chance = crop_chance
 
@@ -45,33 +47,42 @@ class RawDataset:
             tbv = float(headers["tbv"])
             age = int(headers["age_days"])
 
-            upper_voxels, lower_voxels = self._get_voxel_range(tensor, tbv, voxel_vol)
+            if self.no_crop:
+                tensor, voxel_vol = self._prep_raster(tensor, voxel_vol, no_crop=True)
+                voxel_count = tbv / voxel_vol
+
+                self.voxels_min = min(self.voxels_min, voxel_count)
+                self.voxels_max = max(self.voxels_max, voxel_count)
+
+                if verbose:
+                    print(f"Loaded {pid} with {voxel_count:.2f} voxels. Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3.")
+            else:
+                upper_voxels, lower_voxels = self._get_voxel_range(tensor, tbv, voxel_vol)
+                voxel_count = (upper_voxels + lower_voxels) / 2
+
+                self.voxels_min = min(self.voxels_min, lower_voxels)
+                self.voxels_max = max(self.voxels_max, upper_voxels)
+
+                if verbose:
+                    print(f"Loaded {pid} with {lower_voxels:.2f} - {upper_voxels:.2f} voxels. Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3.")
+
+            self.age_min = min(self.age_min, age)
+            self.age_max = max(self.age_max, age)
+
             data.append({
                 "pid": pid,
                 "age": age,
                 "tbv": tbv,
-                "avg_voxels": (upper_voxels + lower_voxels) / 2,
+                "voxel_count": voxel_count,
                 "voxel_vol": voxel_vol,
                 "raster": tensor
             })
 
-            if verbose:
-                print(f"Loaded {pid} with {lower_voxels:.2f} - {upper_voxels:.2f} voxels. Age: {age}, TBV: {tbv}, Voxel Volume: {voxel_vol:.3f} cm3.")
+        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "voxel_count", "voxel_vol", "raster"], data=data)
+        self.dataset[["age", "tbv", "voxel_count", "voxel_vol"]] = self.dataset[["age", "tbv", "voxel_count", "voxel_vol"]].apply(pd.to_numeric)
 
-            self.voxels_min = min(self.voxels_min, lower_voxels)
-            self.voxels_max = max(self.voxels_max, upper_voxels)
-            self.age_min = min(self.age_min, age)
-            self.age_max = max(self.age_max, age)
-        
-        # Note: The voxels the brain occupies are calculated on the fly depending on cropping and zooming 
-        #       'avg_voxels' is only meant for data standardization, not for prediction. 
-        #       It is dropped after we have the mean and std for the dataset. 
-
-        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "avg_voxels", "voxel_vol", "raster"], data=data)
-        self.dataset[["age", "tbv", "avg_voxels", "voxel_vol"]] = self.dataset[["age", "tbv", "avg_voxels", "voxel_vol"]].apply(pd.to_numeric)
-
-        self.voxels_mean = self.dataset["avg_voxels"].mean()
-        self.voxels_std = self.dataset["avg_voxels"].std()
+        self.voxels_mean = self.dataset["voxel_count"].mean()
+        self.voxels_std = self.dataset["voxel_count"].std()
         self.age_mean = self.dataset["age"].mean()
         self.age_std = self.dataset["age"].std()
 
@@ -82,13 +93,22 @@ class RawDataset:
 
         self.dataset["age"] = self.normalize_age(self.dataset["age"])
 
-        self.dataset.drop(columns=["avg_voxels"], inplace=True)
+        # The voxels the brain occupies are calculated on the fly depending on cropping and zooming if cropping is enabled. 
+        # 'voxel_count' is then only meant for data standardization, not for prediction. 
+        # It is dropped after we have the mean and std for the dataset. 
+        if not self.no_crop:
+            self.dataset.drop(columns=["voxel_count"], inplace=True)
+        else:
+            self.dataset["voxel_count"] = self.normalize_voxels(self.dataset["voxel_count"])
 
         if verbose:
             self.print_stats()
     
     def _get_voxel_range(self, raster, tbv, voxel_vol):
         original_voxels = tbv / voxel_vol
+
+        if self.no_crop: 
+            return original_voxels, original_voxels
 
         cropped_side_len = self._reshape_raster(raster, return_shape_only=True, force_crop_factor=self.crop_factor)[0]
         resize_factor = self.side_len / cropped_side_len
@@ -124,19 +144,23 @@ class RawDataset:
     
             return pad(crop(raster))
         
-    def _prep_raster(self, raster, voxel_vol, new_side_len=100, no_crop=False):
-        original_raster = self._reshape_raster(raster, no_crop=no_crop)
-        original_side_len = original_raster.shape[-1]
-        original_voxel_vol = voxel_vol
+    def _prep_raster(self, raster, voxel_vol, no_crop=False):
+        if self.no_deform:
+            # First pad and optionally crop the raster to be a cube
+            raster = self._reshape_raster(raster, no_crop=no_crop)
+            original_side_len = raster.shape[-1]
+            original_voxel_vol = voxel_vol
+            
+            # Resize the raster to be a cube of side length new_side_len
+            resize_factor = self.side_len / original_side_len
 
-        if np.array_equal(original_side_len, new_side_len):
-            return original_raster, original_voxel_vol
-        
-        # Resize the raster to be a cube of side length new_side_len
-        resize_factor = new_side_len / original_side_len
-
-        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
-        new_voxel_vol = original_voxel_vol / resize_factor
+            new_raster = torch.from_numpy(scipy.ndimage.zoom(raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
+            new_voxel_vol = original_voxel_vol / resize_factor
+        else:
+            # Without reshaping first, deform the raster into a cube of side length self.side_len
+            resize_factors = [self.side_len / raster.shape[1], self.side_len / raster.shape[2], self.side_len / raster.shape[3]]
+            new_raster = torch.from_numpy(scipy.ndimage.zoom(raster.squeeze(0), resize_factors, order=1)).unsqueeze(0)
+            new_voxel_vol = voxel_vol / np.prod(resize_factors)
 
         return new_raster, new_voxel_vol
 
@@ -147,8 +171,13 @@ class RawDataset:
         no_crop = no_crop or (np.random.uniform() > self.crop_chance)
 
         item = self.dataset.iloc[idx]
-        raster, voxel_vol = self._prep_raster(item["raster"], item["voxel_vol"], new_side_len=self.side_len, no_crop=no_crop)
-        voxel_count = self.normalize_voxels(item["tbv"] / voxel_vol)
+        if self.no_crop:
+            raster = item["raster"]
+            voxel_count = item["voxel_count"]
+            voxel_vol = item["voxel_vol"]
+        else:
+            raster, voxel_vol = self._prep_raster(item["raster"], item["voxel_vol"], no_crop=no_crop)
+            voxel_count = self.normalize_voxels(item["tbv"] / voxel_vol)
 
         item = {
             "age": item["age"],
@@ -220,8 +249,8 @@ class TrainDataset(RasterDataset):
 
         self.transform = tio.Compose([
             tio.OneOf({
-                tio.transforms.RandomAffine(scales=0, degrees=15, translation=0, default_pad_value='minimum'): 0.8,
-                tio.transforms.RandomAffine(scales=0, degrees=90, translation=0, default_pad_value='minimum'): 0.2
+                tio.transforms.RandomAffine(scales=0, degrees=15, translation=0.1, default_pad_value='minimum'): 0.8,
+                tio.transforms.RandomAffine(scales=0, degrees=90, translation=0.1, default_pad_value='minimum'): 0.2
             }, p=0.8),
             tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.15),
             tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.15),

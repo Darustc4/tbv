@@ -372,6 +372,8 @@ class BrainVisualizer(ctk.CTk):
         self.current_slice = 0
         self.total_slices = self.nrrd_data.shape[self.axis_list.index(self.axis)]
 
+        self.tk_total_slices_var.set(self.total_slices)
+        
         self.tk_slice_slider.configure(to=self.total_slices-1)
         self.tk_current_slice_var.set(0)
         self.tk_slice_slider_var.set(0)

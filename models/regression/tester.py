@@ -16,10 +16,12 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_dir, pids, side_len=96, crop_factor=0.8, crop_chance=0.3, std_params={}, use_age=False, output_noise=False):
+    def __init__(self, data_dir, pids, side_len=96, no_crop=False, no_deform=True, crop_factor=0.8, crop_chance=0.3, std_params={}, use_age=False, output_noise=False):
         self.data_dir = data_dir
         self.pids = pids
         self.side_len = side_len
+        self.no_crop = no_crop
+        self.no_deform = no_deform
         self.crop_factor = crop_factor
         self.crop_chance = crop_chance
         self.use_age = use_age
@@ -57,16 +59,21 @@ class Dataset(torch.utils.data.Dataset):
                 tbv = float(headers["tbv"])
                 age = int(headers["age_days"])
 
+                if self.no_crop:
+                    tensor, voxel_volume = self._prep_raster(tensor, voxel_volume, no_crop=True)
+                    voxel_count = tbv / voxel_volume
+
                 data.append({
                     "pid": pid,
                     "age": age,
                     "tbv": tbv,
                     "voxel_volume": voxel_volume,
+                    "voxels": voxel_count if self.no_crop else None,
                     "raster": tensor
                 })
 
-        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "voxel_volume", "raster"], data=data)
-        self.dataset[["age", "tbv", "voxel_volume"]] = self.dataset[["age", "tbv", "voxel_volume"]].apply(pd.to_numeric)
+        self.dataset = pd.DataFrame(columns=["pid", "age", "tbv", "voxel_volume", "voxels", "raster"], data=data)
+        self.dataset[["age", "tbv", "voxel_volume", "voxels"]] = self.dataset[["age", "tbv", "voxel_volume", "voxels"]].apply(pd.to_numeric)
 
         if self.use_age:
             self.dataset["age"] = self.normalize_age(self.dataset["age"])
@@ -100,21 +107,25 @@ class Dataset(torch.utils.data.Dataset):
     
             return pad(crop(raster))
         
-    def _prep_raster(self, raster, voxel_volume, new_side_len=100, no_crop=False):
-        original_raster = self._reshape_raster(raster, no_crop=no_crop)
-        original_side_len = original_raster.shape[-1]
-        original_voxel_volume = voxel_volume
+    def _prep_raster(self, raster, voxel_vol, no_crop=False):
+        if self.no_deform:
+            # First pad and optionally crop the raster to be a cube
+            raster = self._reshape_raster(raster, no_crop=no_crop)
+            original_side_len = raster.shape[-1]
+            original_voxel_vol = voxel_vol
+            
+            # Resize the raster to be a cube of side length new_side_len
+            resize_factor = self.side_len / original_side_len
 
-        if np.array_equal(original_side_len, new_side_len):
-            return original_raster, original_voxel_volume
-        
-        # Resize the raster to be a cube of side length new_side_len
-        resize_factor = new_side_len / original_side_len
+            new_raster = torch.from_numpy(scipy.ndimage.zoom(raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
+            new_voxel_vol = original_voxel_vol / resize_factor
+        else:
+            # Without reshaping first, deform the raster into a cube of side length self.side_len
+            resize_factors = [self.side_len / raster.shape[1], self.side_len / raster.shape[2], self.side_len / raster.shape[3]]
+            new_raster = torch.from_numpy(scipy.ndimage.zoom(raster.squeeze(0), resize_factors, order=1)).unsqueeze(0)
+            new_voxel_vol = voxel_vol / np.prod(resize_factors)
 
-        new_raster = torch.from_numpy(scipy.ndimage.zoom(original_raster.squeeze(0), (resize_factor, resize_factor, resize_factor), order=1)).unsqueeze(0)
-        new_voxel_volume = original_voxel_volume / resize_factor
-
-        return new_raster, new_voxel_volume
+        return new_raster, new_voxel_vol
 
     def __len__(self):
         return len(self.dataset)
@@ -123,11 +134,17 @@ class Dataset(torch.utils.data.Dataset):
         self.no_crop = no_crop
 
     def __getitem__(self, idx):
-        no_crop = self.no_crop or (np.random.uniform() > self.crop_chance)
-
         item = self.dataset.iloc[idx]
-        raster, voxel_volume = self._prep_raster(item["raster"], item["voxel_volume"], new_side_len=self.side_len, no_crop=no_crop)
-        voxel_count = self.normalize_voxels(item["tbv"] / voxel_volume)
+
+        if not self.no_crop:
+            no_crop = np.random.uniform() > self.crop_chance
+
+            raster, voxel_volume = self._prep_raster(item["raster"], item["voxel_volume"], no_crop=no_crop)
+            voxel_count = self.normalize_voxels(item["tbv"] / voxel_volume)
+        else:
+            raster = item["raster"]
+            voxel_volume = item["voxel_volume"]
+            voxel_count = self.normalize_voxels(item["voxels"])
 
         item = {
             "age": item["age"],
@@ -188,40 +205,42 @@ if __name__ == "__main__":
         model = RasterNet()
     elif args.model_name == "resnet":
         from conv3d_no_age_resnet import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [2, 3, 4, 2])
+        model = RasterNet(ResidualBlock, [3, 3, 5, 4])
+        model.do.p = 0.3
+        model.enable_dropblock = False
     else:
         raise ValueError("Invalid model name")
 
     dataset = Dataset(
         data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise, 
-        side_len=96, crop_factor=0.9, crop_chance=1.0
+        no_crop=True, no_deform=False, side_len=96, crop_factor=0.9, crop_chance=1.0
     )
 
     if args.mode == "lenient":     refuse_threshold = 12.0
-    elif args.mode == "normal":    refuse_threshold = 6.0
-    elif args.mode == "strict":    refuse_threshold = 3.0
+    elif args.mode == "normal":    refuse_threshold = 9.0
+    elif args.mode == "strict":    refuse_threshold = 6.0
     else: raise ValueError("Invalid mode")
 
     model.load_state_dict(torch.load(os.path.join(args.weights_dir, weights_file), map_location=torch.device('cpu')))
-    model.eval()
-
+    
     batch_size = 8
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     print("Computing the mean and standard deviation of the test set for non-bayesian mode...")
 
     eval_all_diffs = []
     eval_all_tbvs = []
     transforms = tio.Compose([
-        tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.8),
-        tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.3),
-        tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.3),
+        tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.6),
+        tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
+        tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
         tio.OneOf({
-            tio.transforms.RandomNoise(mean=0, std=0.1),
-            tio.transforms.RandomBlur(std=0.1)
+            tio.transforms.RandomNoise(mean=0, std=0.05),
+            tio.transforms.RandomBlur(std=0.05)
         }, p=0.3)
     ])
 
+    model.eval()
     dataset.set_no_crop(True)
     with torch.no_grad():
         for i, data in enumerate(dataloader):
@@ -250,6 +269,7 @@ if __name__ == "__main__":
 
         refused_raster_count = 0
 
+        model.train()
         dataset.set_no_crop(False)
         with torch.no_grad():
             for _ in range(args.bayes_runs):
@@ -262,7 +282,7 @@ if __name__ == "__main__":
                     trf_rasters = torch.zeros(rasters.shape)
                     for j in range(rasters.shape[0]):
                         trf_rasters[j] = transforms(rasters[j])
-
+                    
                     predictions = model(trf_rasters).squeeze().reshape(-1, 1)
                     predictions = dataset.normalize_voxels(predictions, inverse=True)
                     predicted_tbvs = predictions * data["voxel_volume"].numpy().reshape(-1, 1)
