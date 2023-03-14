@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib.transforms import Affine2D
 
 import os
 import json
@@ -107,40 +108,89 @@ if __name__ == "__main__":
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
-    tr_score, val_score, unscaled_loss = run(
-        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
-        optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=125, 
-        batch_size=8, data_workers=8, trace_func=print,
-        dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
-        scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
-        scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
-        override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
-    )
-    
-    # first fold training and validation loss plot
-    plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
-    plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.yscale("log")
-    plt.legend()
+    with open("plots/conv3d_no_age_resnet_log.txt", "w") as f:
+        
+        def logger(file):
+            def log_to_file(msg="", end="\n"):
+                print(msg, end=end)
+                if end != '\r':
+                    file.write(msg + end)
+            return log_to_file
 
-    # Move best weights and plot to folders
-    if not os.path.exists("weights"):
-        os.makedirs("weights")
-    if not os.path.exists("plots"):
-        os.makedirs("plots")
-    
-    label_std_params = {
-        "voxels_min": raw_dataset.voxels_min,
-        "voxels_max": raw_dataset.voxels_max,
-        "voxels_mean": raw_dataset.voxels_mean,
-        "voxels_std": raw_dataset.voxels_std
-    }
+        tr_score, val_score, final_results = run(
+            model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
+            optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
+            k_fold=6, num_epochs=300, patience=50, early_stop_ignore_first_epochs=125, 
+            batch_size=8, data_workers=8, trace_func=logger(f),
+            dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
+            scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
+            scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
+            bayes_runs=30, max_bayes_mse=9.0,
+            #override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
+        )
+        
+        # first fold training and validation loss plot
+        plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
+        plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.yscale("log")
+        plt.legend()
 
-    with open(os.path.join("weights", "conv3d_no_age_resnet.json"), "w") as f:
-        json.dump(label_std_params, f)
-    plt.savefig("plots/conv3d_no_age_resnet.png")
-    os.rename("best_weights.pt", "weights/conv3d_no_age_resnet.pt")
-    
+        # Move best weights and plot to folders
+        if not os.path.exists("weights"):
+            os.makedirs("weights")
+        if not os.path.exists("plots"):
+            os.makedirs("plots")
+        
+        label_std_params = {
+            "voxels_min": raw_dataset.voxels_min,
+            "voxels_max": raw_dataset.voxels_max,
+            "voxels_mean": raw_dataset.voxels_mean,
+            "voxels_std": raw_dataset.voxels_std
+        }
+
+        with open(os.path.join("weights", "conv3d_no_age_resnet.json"), "w") as f:
+            json.dump(label_std_params, f)
+        plt.savefig("plots/conv3d_no_age_resnet.png")
+        
+        for i in range(len(final_results)):
+            os.rename(f"best_weights_{i+1}.pt", f"weights/conv3d_no_age_resnet_{i+1}.pt")
+
+        if len(final_results) == 6:
+            plt.clf()
+            figure, axis = plt.subplots(3, 2)
+            for i in range(3):
+                for j in range(2):
+                    axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=1.0)
+                    axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=1.0)
+                    axis[i][j].set_xlabel("Epochs")
+                    axis[i][j].set_ylabel("Loss")
+
+            handles, labels = axis[i][j].get_legend_handles_labels()
+            figure.legend(handles, labels, loc='lower center')
+
+            figure.tight_layout()
+            plt.savefig("plots/conv3d_no_age_resnet_folds.png")
+
+            final_results = pd.DataFrame.from_records([r.to_dict() for r in final_results])
+            avg_loss = final_results['tbv_error_mean']
+            std_loss = final_results['tbv_error_std']
+            bayes_avg_loss = final_results['tbv_error_mean_bayes']
+            bayes_std_loss = final_results['tbv_error_std_bayes']
+
+            plt.clf()
+            figure, axis = plt.subplots()
+            
+            trans1 = Affine2D().translate(-0.05, 0.0) + axis.transData
+            trans2 = Affine2D().translate(0.05, 0.0) + axis.transData
+            
+            axis.errorbar(x=range(1,7), y=avg_loss, yerr=std_loss, fmt='o', label="TBV Loss", transform=trans1)
+            axis.errorbar(x=range(1,7), y=bayes_avg_loss, yerr=bayes_std_loss, fmt='o', label="Bayes. TBV Loss", transform=trans2)
+            
+            axis.set_xlabel("Fold")
+            axis.set_ylabel("TBV Loss")
+            figure.legend()
+            figure.savefig("plots/conv3d_no_age_resnet_folds_bayes.png")
+
+            

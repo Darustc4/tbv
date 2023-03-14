@@ -275,7 +275,6 @@ if __name__ == "__main__":
             for _ in range(args.bayes_runs):
                 run_diffs = []
                 for i, data in enumerate(dataloader):
-
                     rasters = data["raster"].float()
                     tbvs = data["tbv"].float().numpy().reshape(-1, 1)
                     

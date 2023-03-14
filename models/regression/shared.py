@@ -468,15 +468,96 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
     
     return train_loss_list, val_loss_list
 
-def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=print, verbose=False):
+class Final_results:
+    class Bayes_results:
+        def __init__(self):
+            self.tbv_error_mean = None
+            self.tbv_error_std = None
+            
+            self.age_error_mean = None
+            self.age_error_std = None
+            
+            self.big_error_mean = None
+            self.big_error_std = None
+            self.big_error_count = None
+
+        def set_tbv_error(self, tbv_error_mean, tbv_error_std):
+            self.tbv_error_mean = tbv_error_mean
+            self.tbv_error_std = tbv_error_std
+        
+        def set_age_error(self, age_error_mean, age_error_std):
+            self.age_error_mean = age_error_mean
+            self.age_error_std = age_error_std
+        
+        def set_big_error(self, big_error_mean, big_error_std, big_error_count):
+            self.big_error_mean = big_error_mean
+            self.big_error_std = big_error_std
+            self.big_error_count = big_error_count
+        
+        def to_dict(self):
+            return {
+                "tbv_error_mean": self.tbv_error_mean,
+                "tbv_error_std": self.tbv_error_std,
+                "age_error_mean": self.age_error_mean,
+                "age_error_std": self.age_error_std,
+                "big_error_mean": self.big_error_mean,
+                "big_error_std": self.big_error_std,
+                "big_error_count": self.big_error_count
+            }
+
+    def __init__(self):
+        self.tbv_error_mean = None
+        self.tbv_error_std = None
+        
+        self.age_error_mean = None
+        self.age_error_std = None
+        
+        self.big_error_mean = None
+        self.big_error_std = None
+        self.big_error_count = None
+
+        self.bayes_results = []
+
+    def set_tbv_error(self, tbv_error_mean, tbv_error_std):
+        self.tbv_error_mean = tbv_error_mean
+        self.tbv_error_std = tbv_error_std
+    
+    def set_age_error(self, age_error_mean, age_error_std):
+        self.age_error_mean = age_error_mean
+        self.age_error_std = age_error_std
+    
+    def set_big_error(self, big_error_mean, big_error_std, big_error_count):
+        self.big_error_mean = big_error_mean
+        self.big_error_std = big_error_std
+        self.big_error_count = big_error_count
+
+    def add_bayes_results(self, bayes_results):
+        self.bayes_results.append(bayes_results)
+
+    def to_dict(self):
+        return {
+            "tbv_error_mean": self.tbv_error_mean,
+            "tbv_error_std": self.tbv_error_std,
+            "age_error_mean": self.age_error_mean,
+            "age_error_std": self.age_error_std,
+            "big_error_mean": self.big_error_mean,
+            "big_error_std": self.big_error_std,
+            "big_error_count": self.big_error_count,
+            "bayes_results": [bayes_result.to_dict() for bayes_result in self.bayes_results]
+        }
+
+def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30, max_bayes_mse=9.0, big_diff_threshold=30, trace_func=print, verbose=False):
     all_diffs_tbv = []
     all_diffs_age = []
-    model.eval()
+
+    bayes_diffs_tbv = []
+    bayes_diffs_age = []
 
     if(verbose):
         trace_func("\nEvaluating model on test set...")
 
     with torch.no_grad():
+        model.eval()
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float().to(device)
             tbvs = data["tbv"].float().numpy().reshape(-1, 1)
@@ -516,38 +597,201 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, trace_func=pr
                     if train_mode == TrainMode.OUT_AGE:
                         trace_func(f"Predicted Age: {pred_ages[j][0]:.2f}\tActual Age: {ages[j][0]:.2f}\tDifference: {age_diffs[j][0]:.2f}")
 
-    all_diffs_tbv = np.concatenate(all_diffs_tbv)
-    avg_diff_tbv = round(np.mean(all_diffs_tbv), 2)
-    std_diff_tbv = round(np.std(all_diffs_tbv), 2)
-    
-    if train_mode == TrainMode.OUT_AGE:
-        all_diffs_age = np.concatenate(all_diffs_age)
-        avg_diff_age = round(np.mean(all_diffs_age), 2)
-        std_diff_age = round(np.std(all_diffs_age), 2)
+        final_results = Final_results()
+        
+        all_diffs_tbv = np.concatenate(all_diffs_tbv)
+        avg_diff_tbv = round(np.mean(all_diffs_tbv), 2)
+        std_diff_tbv = round(np.std(all_diffs_tbv), 2)
+
+        final_results.set_tbv_error(avg_diff_tbv, std_diff_tbv)
+        
+        all_big_diffs = [diff for diff in all_diffs_tbv if diff > big_diff_threshold]
+
+        if len(all_big_diffs) > 0:
+            final_results.set_big_error(len(all_big_diffs), np.mean(all_big_diffs), np.std(all_big_diffs))
+
+        if train_mode == TrainMode.OUT_AGE:
+            all_diffs_age = np.concatenate(all_diffs_age)
+            avg_diff_age = round(np.mean(all_diffs_age), 2)
+            std_diff_age = round(np.std(all_diffs_age), 2)
+
+            final_results.set_age_error(avg_diff_age, std_diff_age)
+        
+        # Now evaluate the model with Bayesian runs in 3 different modes.
+        if bayes_runs and bayes_runs > 0:
+            transforms = tio.Compose([
+                tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.6),
+                tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
+                tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
+                tio.OneOf({
+                    tio.transforms.RandomNoise(mean=0, std=0.05),
+                    tio.transforms.RandomBlur(std=0.05)
+                }, p=0.3)
+            ])
+
+            trace_func(f"\nEvaluating model with {bayes_runs} Bayesian runs...")
+
+            model.enable_dropblock = False
+            for i in range(3):
+                diff_matrix_tbv = []
+                diff_matrix_age = []
+                refused_raster_count = 0
+                
+                if i == 0:
+                    # Dropout + transforms
+                    model.train()
+                    pipeline = transforms
+                    trace_func(f"\nEvaluating model with transforms and dropout...")
+                elif i == 1:
+                    # Transforms only
+                    model.eval()
+                    pipeline = transforms
+                    trace_func(f"\nEvaluating model with transforms only...")
+                elif i == 2:
+                    # Dropout only
+                    model.train()
+                    pipeline = tio.Compose([])
+                    trace_func(f"\nEvaluating model with dropout only...")
+
+                for _ in range(bayes_runs):
+                    run_diffs_tbv = []
+                    run_diffs_age = []
+                    for i, data in enumerate(dataloader):
+                        rasters = data["raster"].float()
+                        tbvs = data["tbv"].float().numpy().reshape(-1, 1)
+                        if train_mode != TrainMode.NO_AGE:
+                            ages = data["age"].float().reshape(-1, 1)
+
+                        trf_rasters = torch.zeros(rasters.shape)
+                        for j in range(rasters.shape[0]):
+                            trf_rasters[j] = pipeline(rasters[j])
+                        trf_rasters = trf_rasters.to(device)
+
+                        if train_mode == TrainMode.NO_AGE:
+                            pred_voxels = model(trf_rasters).squeeze().cpu()
+                        elif train_mode == TrainMode.IN_AGE:
+                            pred_voxels = model(trf_rasters, ages.to(device)).squeeze().cpu()
+                            ages = ages.cpu()
+                        elif train_mode == TrainMode.OUT_AGE:
+                            predictions = model(trf_rasters).squeeze().cpu()
+                            pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
+                            pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
+                            
+                        pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
+                        pred_voxels = raw_dataset.normalize_voxels(pred_voxels, inverse=True)
+
+                        if train_mode == TrainMode.OUT_AGE:
+                            pred_ages = raw_dataset.normalize_ages(pred_ages, inverse=True)
+                            ages = raw_dataset.normalize_ages(ages, inverse=True)
+
+                        pred_tbvs = pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1)
+                        run_diffs_tbv.append(pred_tbvs)
+                        if train_mode == TrainMode.OUT_AGE:
+                            run_diffs_age.append(pred_ages)
+
+                    diff_matrix_tbv.append(np.array(np.concatenate(run_diffs_tbv)).squeeze())
+                    if train_mode == TrainMode.OUT_AGE:
+                        diff_matrix_age.append(np.array(np.concatenate(run_diffs_age)).squeeze())
+
+                error = np.std(np.stack(diff_matrix_tbv), axis=0)
+
+                for i in range(len(error)):
+                    if error[i] < max_bayes_mse:
+                        bayes_diffs_tbv.append(all_diffs_tbv[i][0])
+                        if train_mode == TrainMode.OUT_AGE:
+                            bayes_diffs_age.append(all_diffs_age[i][0])
+                    else:
+                        refused_raster_count += 1
+                        if(verbose):
+                            trace_func(f"Refused raster with error {error[i]:.2f}. TBV: {all_diffs_tbv[i][0]:.2f}.")
+                
+                if len(bayes_diffs_tbv) > 0:
+                    bayes_results = Final_results.Bayes_results()
+
+                    bayes_diffs_tbv = np.array(bayes_diffs_tbv)
+                    bayes_avg_diff_tbv = round(np.mean(bayes_diffs_tbv), 2)
+                    bayes_std_diff_tbv = round(np.std(bayes_diffs_tbv), 2)
+
+                    bayes_results.set_tbv_error(bayes_avg_diff_tbv, bayes_std_diff_tbv)
+                    
+                    if train_mode == TrainMode.OUT_AGE:
+                        bayes_diffs_age = np.array(bayes_diffs_age)
+                        bayes_avg_diff_age = round(np.mean(bayes_diffs_age), 2)
+                        bayes_std_diff_age = round(np.std(bayes_diffs_age), 2)
+
+                        bayes_results.set_age_error(bayes_avg_diff_age, bayes_std_diff_age)
+                    
+                    bayes_big_diffs = [diff for diff in bayes_diffs_tbv if diff > big_diff_threshold]
+
+                    bayes_results.set_big_diffs(len(bayes_big_diffs))
+
+                    final_results.set_bayes_results(bayes_results)
+                else:
+                    final_results.set_bayes_results(None)
 
     if(verbose):
         trace_func()
-        trace_func(f"Average difference TBV: {avg_diff_tbv} cc.\tStandard deviation TBV: {std_diff_tbv} cc.")
+        trace_func("- - - - - -")
+        trace_func(f"Total Raster Count: {len(all_diffs_tbv)}")
+        if bayes_runs and bayes_runs > 0: trace_func(f"Refused Raster Count: {refused_raster_count}")
+        trace_func("- - - - - -")
+        trace_func()
+        trace_func("- - - - - -")
+        trace_func("Non-bayesian prediction:")
+        trace_func(f"Mean Absolute Error: {avg_diff_tbv:.2f} cc")
+        trace_func(f"Standard Deviation: {std_diff_tbv:.2f} cc")
         if train_mode == TrainMode.OUT_AGE:
-            trace_func(f"Average difference Age: {avg_diff_age} days.\tStandard deviation Age: {std_diff_age} days.")
+            trace_func(f"Mean Absolute Error Age: {avg_diff_age:.2f} days")
+            trace_func(f"Standard Deviation Age: {std_diff_age:.2f} days")
+        trace_func(f"Big error count (>{big_diff_threshold}): {len(all_big_diffs)}")
+        if(len(all_big_diffs) > 0):
+            trace_func(f"Big error mean: {np.mean(all_big_diffs):.2f} cc")
+            trace_func(f"Big error std: {np.std(all_big_diffs):.2f} cc")
+        trace_func("- - - - - -")
+        if bayes_runs and bayes_runs > 0:
+            trace_func()
+            trace_func("- - - - - -")
+            trace_func("Bayesian prediction:")
+            if len(bayes_diffs_tbv) > 0:
+                trace_func(f"Mean Absolute Error: {bayes_avg_diff_tbv:.2f} cc")
+                trace_func(f"Standard Deviation: {bayes_std_diff_tbv:.2f} cc")
+                if train_mode == TrainMode.OUT_AGE:
+                    trace_func(f"Mean Absolute Error Age: {bayes_avg_diff_age:.2f} days")
+                    trace_func(f"Standard Deviation Age: {bayes_std_diff_age:.2f} days")
+                trace_func(f"Big error count (>{big_diff_threshold}): {len(bayes_big_diffs)}")
+                if(len(bayes_big_diffs) > 0):
+                    trace_func(f"Big error mean: {np.mean(bayes_big_diffs):.2f} cc")
+                    trace_func(f"Big error std: {np.std(bayes_big_diffs):.2f} cc")
+            else:
+                trace_func("No rasters were accepted.")
+            trace_func("- - - - - -")
+        trace_func()
 
-    if train_mode == TrainMode.OUT_AGE:
-        return avg_diff_tbv, std_diff_tbv, avg_diff_age, std_diff_age
-    else:
-        return avg_diff_tbv, std_diff_tbv
+    
+
+    if bayes_runs and bayes_runs > 0 and len(bayes_diffs_tbv) > 0:
+        final_results.set_tbv_error_bayes(bayes_avg_diff_tbv, bayes_std_diff_tbv)
+        if len(bayes_big_diffs) > 0:
+            final_results.set_big_error_bayes(len(bayes_big_diffs), np.mean(bayes_big_diffs), np.std(bayes_big_diffs))
+
+        if train_mode == TrainMode.OUT_AGE:
+            final_results.set_age_error_bayes(bayes_avg_diff_age, bayes_std_diff_age)
+    
+    return final_results
 
 def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
         optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, 
         early_stop_ignore_first_epochs= 100,  batch_size=8, data_workers=4, trace_func=print, 
         scheduler_class=None, scheduler_params={}, k_fold=6, grad_clip=5, override_val_pids=None,
-        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0)):
+        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0),
+        bayes_runs=30, max_bayes_mse=9.0):
 
     # Save model to reset it after each fold
     torch.save(model.state_dict(), "base_weights.pt")
 
-    train_score = pd.Series(dtype=np.float32)
-    val_score = pd.Series(dtype=np.float32)
-    unscaled_loss = pd.Series(dtype=np.float32)
+    train_score = []
+    val_score = []
+    final_results = []
     
     unique_pids = raw_dataset.get_unique_pids()
     total_pids = len(unique_pids)
@@ -557,7 +801,8 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
     # tr:train, val:valid; r:right,l:left;  eg: trrr: right index of right side train subset 
     # index: [trll,trlr],[vall,valr],[trrl,trrr]
     for i in range(k_fold):
-        trace_func(f"Fold {i+1}/{k_fold}")
+        trace_func(f" - - - Fold {i+1}/{k_fold} - - -")
+        trace_func()
 
         model.load_state_dict(torch.load("base_weights.pt"))
 
@@ -592,8 +837,10 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
         train_set = TrainDataset(raw_dataset, train_pids)
         val_set = ValDataset(raw_dataset, val_pids)
 
-        trace_func(f"Train volumes: {len(train_set)}")
-        trace_func(f"Validation volumes: {len(val_set)}")
+        trace_func(f"Train volume count: {len(train_set)}")
+        trace_func(f"Validation volume count: {len(val_set)}")
+        trace_func(f"Validation volumes: {train_pids}")
+        trace_func()
 
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, pin_memory=True)
         val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=data_workers, pin_memory=True)
@@ -607,14 +854,23 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
         
         model.load_state_dict(torch.load("best_weights.pt"))
 
-        train_score.at[i] = train_loss_list
-        val_score.at[i] = val_loss_list
-        unscaled_loss.at[i] = final_eval(model, val_dataloader, raw_dataset, device, train_mode, trace_func=trace_func, verbose=True)
+        train_score.append(train_loss_list)
+        val_score.append(val_loss_list)
+        final_results.append(
+            final_eval(model, val_dataloader, raw_dataset, device, train_mode, 
+                       bayes_runs=bayes_runs, max_bayes_mse=max_bayes_mse,
+                       trace_func=trace_func, verbose=True)
+        )
+
+        os.rename("best_weights.pt", f"best_weights_{i+1}.pt")
 
         if override_val_pids:
             # If we are overriding the validation set, we don't want to do any more folds
             break
+
+    if os.path.exists("best_weights.pt"):
+        os.remove("best_weights.pt")
+    if os.path.exists("base_weights.pt"):
+        os.remove("base_weights.pt")
     
-    os.remove("base_weights.pt")
-    
-    return train_score, val_score, unscaled_loss
+    return train_score, val_score, final_results

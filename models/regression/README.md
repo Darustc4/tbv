@@ -54,6 +54,30 @@ Average difference TBV: 12.02 cc.       Standard deviation TBV: 11.4 cc.
 
 Average difference TBV: 11.5 cc.        Standard deviation TBV: 11.11 cc.
 
+- - - - - -
+Total Raster Count: 76
+Refused Raster Count: 15
+- - - - - -
+
+- - - - - -
+Non-bayesian prediction:
+Mean Absolute Error: 11.50 cc
+Standard Deviation: 11.11 cc
+Big error count (>30): 6
+Big error mean: 39.57 cc
+Big error std: 10.51 cc
+- - - - - -
+
+- - - - - -
+Bayesian prediction:
+Among accepted rasters:
+Mean Absolute Error: 9.27 cc
+Standard Deviation: 7.39 cc
+Big error count (>30): 1
+Big error mean: 31.68 cc
+Big error std: 0.00 cc
+- - - - - -
+
 ## :arrow_forward: SIFT-CNN
 
 Results (PREVIOUS):
