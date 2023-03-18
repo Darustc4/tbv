@@ -8,6 +8,8 @@ import nrrd
 import torch
 import torchio as tio
 
+from multiprocessing import Pool
+
 from enum import Enum
 
 from torch.utils.data import Dataset, DataLoader
@@ -241,13 +243,20 @@ class RasterDataset(Dataset):
         return self.raw_dataset.normalize_age(age, inverse)
     
 class TrainDataset(RasterDataset):
+    class TransformMode(Enum):
+        NORMAL = 0
+        BAYES = 1
+        NONE = 2
+
     def __init__(self, raw_dataset, pids, verbose=True):
         super().__init__(raw_dataset)
 
         self.pid_set = set(pids)
         self.volumes = self.raw_dataset.get_indices_from_pids(pids)
 
-        self.transform = tio.Compose([
+        self.mode = 0
+
+        self.train_transform = tio.Compose([
             tio.OneOf({
                 tio.transforms.RandomAffine(scales=0, degrees=15, translation=0.1, default_pad_value='minimum'): 0.8,
                 tio.transforms.RandomAffine(scales=0, degrees=90, translation=0.1, default_pad_value='minimum'): 0.2
@@ -267,6 +276,19 @@ class TrainDataset(RasterDataset):
             }, p=0.03)
         ])
 
+        self.bayes_transform = tio.Compose([
+            tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.6),
+            tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
+            tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
+            tio.OneOf({
+                tio.transforms.RandomNoise(mean=0, std=0.05),
+                tio.transforms.RandomBlur(std=0.05)
+            }, p=0.3)
+        ])
+
+    def set_mode(self, mode):
+        self.mode = mode
+        
     def __len__(self):
         return len(self.volumes)
 
@@ -275,7 +297,10 @@ class TrainDataset(RasterDataset):
             idx = idx.tolist()
 
         entry = self.raw_dataset.get(self.volumes[idx], no_crop=False)
-        raster = self.transform(entry["raster"])
+
+        if self.mode == self.TransformMode.NORMAL:   raster = self.train_transform(entry["raster"])
+        elif self.mode == self.TransformMode.BAYES:  raster = self.bayes_transform(entry["raster"])
+        else:                                        raster = entry["raster"]
 
         return {
             "age": entry["age"], 
@@ -388,7 +413,7 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
 
     has_do = hasattr(model, "do")
     dropout_value = model.do.p if has_do else 0.0
-
+    
     for epoch in range(num_epochs):
         if has_do and epoch % dropout_change_epochs == 0:
             if epoch != 0: dropout_value += dropout_change
@@ -431,38 +456,45 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
             if (i+1) % 5 == 0:
                 trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Step [{i+1}/{len(tr_dataloader)}], Loss: {loss.item():.4f}                                                            ", end="\r")
 
-        validation_loss = 0.
-        model.eval()
-        with torch.no_grad():
-            for i, data in enumerate(val_dataloader):
-                rasters = data["raster"].float().to(device)
-                voxels = data["voxels"].float().to(device)
-                
-                if train_mode != TrainMode.NO_AGE:
-                    ages = data["age"].float().to(device)
-
-                if train_mode == TrainMode.NO_AGE:
-                    predictions = model(rasters).squeeze()
-                    loss = criterion(predictions, voxels)
-                elif train_mode == TrainMode.IN_AGE:
-                    predictions = model(rasters, ages.reshape(-1, 1)).squeeze()
-                    loss = criterion(predictions, voxels)
-                elif train_mode == TrainMode.OUT_AGE:
-                    ground = torch.dstack((voxels, ages)).squeeze()
-                    predictions = model(rasters).squeeze()
-                    loss = criterion(predictions, ground)
-
-                validation_loss += loss.item()
-
         train_loss = training_loss/len(tr_dataloader)
-        val_loss = validation_loss/len(val_dataloader)
         train_loss_list.at[epoch] = train_loss
-        val_loss_list.at[epoch] = val_loss
+
+        if val_dataloader is not None:
+            validation_loss = 0.
+            model.eval()
+            with torch.no_grad():
+                for i, data in enumerate(val_dataloader):
+                    rasters = data["raster"].float().to(device)
+                    voxels = data["voxels"].float().to(device)
+                    
+                    if train_mode != TrainMode.NO_AGE:
+                        ages = data["age"].float().to(device)
+
+                    if train_mode == TrainMode.NO_AGE:
+                        predictions = model(rasters).squeeze()
+                        loss = criterion(predictions, voxels)
+                    elif train_mode == TrainMode.IN_AGE:
+                        predictions = model(rasters, ages.reshape(-1, 1)).squeeze()
+                        loss = criterion(predictions, voxels)
+                    elif train_mode == TrainMode.OUT_AGE:
+                        ground = torch.dstack((voxels, ages)).squeeze()
+                        predictions = model(rasters).squeeze()
+                        loss = criterion(predictions, ground)
+
+                    validation_loss += loss.item()
+
+            val_loss = validation_loss/len(val_dataloader)
+            val_loss_list.at[epoch] = val_loss
 
         if(scheduler):  scheduler.step(train_loss)
 
-        stopping = early_stopper(epoch, val_loss, model)
-        trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        if val_dataloader is not None:
+            stopping = early_stopper(epoch, val_loss, model)
+            trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+        else:
+            stopping = early_stopper(epoch, train_loss, model)
+            trace_func(f"Epoch [{epoch+1:04d}/{num_epochs:04d}], Training Loss: {train_loss:.4f}, Dropout p: {dropout_value:.2f}, Patience: {early_stopper.counter}/{early_stopper.patience}            ")
+
         if stopping:
             break
     
@@ -470,7 +502,8 @@ def train(model, criterion, optimizer, tr_dataloader, val_dataloader, early_stop
 
 class Final_results:
     class Bayes_results:
-        def __init__(self):
+        def __init__(self, name):
+            self.name = name
             self.tbv_error_mean = None
             self.tbv_error_std = None
             
@@ -480,6 +513,10 @@ class Final_results:
             self.big_error_mean = None
             self.big_error_std = None
             self.big_error_count = None
+            self.big_error_threshold = None
+
+            self.refusal_threshold = None
+            self.refused_count = 0
 
         def set_tbv_error(self, tbv_error_mean, tbv_error_std):
             self.tbv_error_mean = tbv_error_mean
@@ -489,20 +526,29 @@ class Final_results:
             self.age_error_mean = age_error_mean
             self.age_error_std = age_error_std
         
-        def set_big_error(self, big_error_mean, big_error_std, big_error_count):
+        def set_big_error(self, big_error_mean, big_error_std, big_error_count, big_error_threshold):
             self.big_error_mean = big_error_mean
             self.big_error_std = big_error_std
             self.big_error_count = big_error_count
+            self.big_error_threshold = big_error_threshold
         
+        def set_refused_count(self, refused_count, refusal_threshold):
+            self.refused_count = refused_count
+            self.refusal_threshold = refusal_threshold
+
         def to_dict(self):
             return {
+                "name": self.name,
                 "tbv_error_mean": self.tbv_error_mean,
                 "tbv_error_std": self.tbv_error_std,
                 "age_error_mean": self.age_error_mean,
                 "age_error_std": self.age_error_std,
                 "big_error_mean": self.big_error_mean,
                 "big_error_std": self.big_error_std,
-                "big_error_count": self.big_error_count
+                "big_error_count": self.big_error_count,
+                "big_error_threshold": self.big_error_threshold,
+                "refused_count": self.refused_count,
+                "refusal_threshold": self.refusal_threshold
             }
 
     def __init__(self):
@@ -516,6 +562,7 @@ class Final_results:
         self.big_error_std = None
         self.big_error_count = None
 
+        self.total_rasters = 0
         self.bayes_results = []
 
     def set_tbv_error(self, tbv_error_mean, tbv_error_std):
@@ -526,16 +573,21 @@ class Final_results:
         self.age_error_mean = age_error_mean
         self.age_error_std = age_error_std
     
-    def set_big_error(self, big_error_mean, big_error_std, big_error_count):
+    def set_big_error(self, big_error_mean, big_error_std, big_error_count, big_error_threshold):
         self.big_error_mean = big_error_mean
         self.big_error_std = big_error_std
         self.big_error_count = big_error_count
+        self.big_error_threshold = big_error_threshold
 
     def add_bayes_results(self, bayes_results):
         self.bayes_results.append(bayes_results)
 
+    def set_total_rasters(self, total_rasters):
+        self.total_rasters = total_rasters
+
     def to_dict(self):
         return {
+            "total_rasters": self.total_rasters,
             "tbv_error_mean": self.tbv_error_mean,
             "tbv_error_std": self.tbv_error_std,
             "age_error_mean": self.age_error_mean,
@@ -543,20 +595,20 @@ class Final_results:
             "big_error_mean": self.big_error_mean,
             "big_error_std": self.big_error_std,
             "big_error_count": self.big_error_count,
+            "big_error_threshold": self.big_error_threshold,
             "bayes_results": [bayes_result.to_dict() for bayes_result in self.bayes_results]
         }
 
-def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30, max_bayes_mse=9.0, big_diff_threshold=30, trace_func=print, verbose=False):
+def final_eval(model, dataloader, dataset, device, train_mode, bayes_runs=30, max_bayes_mse=9.0, big_diff_threshold=25, trace_func=print, verbose=False):
     all_diffs_tbv = []
     all_diffs_age = []
-
-    bayes_diffs_tbv = []
-    bayes_diffs_age = []
 
     if(verbose):
         trace_func("\nEvaluating model on test set...")
 
     with torch.no_grad():
+        dataset.set_mode(TrainDataset.TransformMode.NONE)
+
         model.eval()
         for i, data in enumerate(dataloader):
             rasters = data["raster"].float().to(device)
@@ -576,11 +628,11 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30
                 pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
             
             pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
-            pred_voxels = raw_dataset.normalize_voxels(pred_voxels, inverse=True)
+            pred_voxels = dataset.normalize_voxels(pred_voxels, inverse=True)
             
             if train_mode == TrainMode.OUT_AGE:
-                pred_ages = raw_dataset.normalize_ages(pred_ages, inverse=True)
-                ages = raw_dataset.normalize_ages(ages, inverse=True)
+                pred_ages = dataset.normalize_ages(pred_ages, inverse=True)
+                ages = dataset.normalize_ages(ages, inverse=True)
           
             pred_tbvs = pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1)
 
@@ -604,11 +656,18 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30
         std_diff_tbv = round(np.std(all_diffs_tbv), 2)
 
         final_results.set_tbv_error(avg_diff_tbv, std_diff_tbv)
-        
+        final_results.set_total_rasters(len(all_diffs_tbv))
+
         all_big_diffs = [diff for diff in all_diffs_tbv if diff > big_diff_threshold]
 
         if len(all_big_diffs) > 0:
-            final_results.set_big_error(len(all_big_diffs), np.mean(all_big_diffs), np.std(all_big_diffs))
+            big_diff_mean = round(np.mean(all_big_diffs), 2)
+            big_diff_std = round(np.std(all_big_diffs), 2)
+        else:
+            big_diff_mean = None
+            big_diff_std = None
+        
+        final_results.set_big_error(big_diff_mean, big_diff_std, len(all_big_diffs), big_diff_threshold)
 
         if train_mode == TrainMode.OUT_AGE:
             all_diffs_age = np.concatenate(all_diffs_age)
@@ -619,99 +678,96 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30
         
         # Now evaluate the model with Bayesian runs in 3 different modes.
         if bayes_runs and bayes_runs > 0:
-            transforms = tio.Compose([
-                tio.transforms.RandomAffine(scales=0, degrees=10, translation=0, default_pad_value='minimum', p=0.6),
-                tio.transforms.RandomFlip(axes=(0, 1, 2), flip_probability=0.2),
-                tio.transforms.RandomAnisotropy(axes=(0, 1, 2), p=0.2),
-                tio.OneOf({
-                    tio.transforms.RandomNoise(mean=0, std=0.05),
-                    tio.transforms.RandomBlur(std=0.05)
-                }, p=0.3)
-            ])
-
             trace_func(f"\nEvaluating model with {bayes_runs} Bayesian runs...")
 
             model.enable_dropblock = False
             for i in range(3):
-                diff_matrix_tbv = []
-                diff_matrix_age = []
+                # Filtered differences
+                bayes_diffs_tbv = []
+                bayes_diffs_age = []
+
+                # Raw differences
+                bayes_matrix_tbv = []
+                bayes_matrix_age = []
+
                 refused_raster_count = 0
                 
                 if i == 0:
                     # Dropout + transforms
                     model.train()
-                    pipeline = transforms
+                    dataset.set_mode(TrainDataset.TransformMode.BAYES)
+                    adjusted_max_bayes_mse = max_bayes_mse * 1.2 # 1.15 better for folding
+                    name = "Dropout + Transforms Bayes"
                     trace_func(f"\nEvaluating model with transforms and dropout...")
                 elif i == 1:
                     # Transforms only
                     model.eval()
-                    pipeline = transforms
+                    dataset.set_mode(TrainDataset.TransformMode.BAYES)
+                    adjusted_max_bayes_mse = max_bayes_mse * 1.0 # 0.625
+                    name = "Transforms Bayes"
                     trace_func(f"\nEvaluating model with transforms only...")
                 elif i == 2:
                     # Dropout only
                     model.train()
-                    pipeline = tio.Compose([])
+                    dataset.set_mode(TrainDataset.TransformMode.NONE)
+                    adjusted_max_bayes_mse = max_bayes_mse * 1.0
+                    name = "Dropout Bayes"
                     trace_func(f"\nEvaluating model with dropout only...")
 
                 for _ in range(bayes_runs):
-                    run_diffs_tbv = []
-                    run_diffs_age = []
+                    run_tbvs = []
+                    run_ages = []
+
                     for i, data in enumerate(dataloader):
-                        rasters = data["raster"].float()
+                        rasters = data["raster"].float().to(device)
                         tbvs = data["tbv"].float().numpy().reshape(-1, 1)
                         if train_mode != TrainMode.NO_AGE:
                             ages = data["age"].float().reshape(-1, 1)
 
-                        trf_rasters = torch.zeros(rasters.shape)
-                        for j in range(rasters.shape[0]):
-                            trf_rasters[j] = pipeline(rasters[j])
-                        trf_rasters = trf_rasters.to(device)
-
                         if train_mode == TrainMode.NO_AGE:
-                            pred_voxels = model(trf_rasters).squeeze().cpu()
+                            pred_voxels = model(rasters).squeeze().cpu()
                         elif train_mode == TrainMode.IN_AGE:
-                            pred_voxels = model(trf_rasters, ages.to(device)).squeeze().cpu()
+                            pred_voxels = model(rasters, ages.to(device)).squeeze().cpu()
                             ages = ages.cpu()
                         elif train_mode == TrainMode.OUT_AGE:
-                            predictions = model(trf_rasters).squeeze().cpu()
+                            predictions = model(rasters).squeeze().cpu()
                             pred_voxels, pred_ages = torch.split(predictions, 1, dim=1)
                             pred_ages = pred_ages.detach().numpy().reshape(-1, 1)
                             
                         pred_voxels = pred_voxels.detach().numpy().reshape(-1, 1)
-                        pred_voxels = raw_dataset.normalize_voxels(pred_voxels, inverse=True)
+                        pred_voxels = dataset.normalize_voxels(pred_voxels, inverse=True)
 
                         if train_mode == TrainMode.OUT_AGE:
-                            pred_ages = raw_dataset.normalize_ages(pred_ages, inverse=True)
-                            ages = raw_dataset.normalize_ages(ages, inverse=True)
+                            pred_ages = dataset.normalize_ages(pred_ages, inverse=True)
+                            ages = dataset.normalize_ages(ages, inverse=True)
 
-                        pred_tbvs = pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1)
-                        run_diffs_tbv.append(pred_tbvs)
+                        run_tbvs.append(pred_voxels * data["voxel_vol"].numpy().reshape(-1, 1))
+
                         if train_mode == TrainMode.OUT_AGE:
-                            run_diffs_age.append(pred_ages)
+                            run_ages.append(pred_ages)
 
-                    diff_matrix_tbv.append(np.array(np.concatenate(run_diffs_tbv)).squeeze())
+                    bayes_matrix_tbv.append(np.array(np.concatenate(run_tbvs)).squeeze())
                     if train_mode == TrainMode.OUT_AGE:
-                        diff_matrix_age.append(np.array(np.concatenate(run_diffs_age)).squeeze())
+                        bayes_matrix_age.append(np.array(np.concatenate(run_ages)).squeeze())
 
-                error = np.std(np.stack(diff_matrix_tbv), axis=0)
+                error = np.std(np.stack(bayes_matrix_tbv), axis=0)
 
                 for i in range(len(error)):
-                    if error[i] < max_bayes_mse:
+                    if error[i] < adjusted_max_bayes_mse:
                         bayes_diffs_tbv.append(all_diffs_tbv[i][0])
                         if train_mode == TrainMode.OUT_AGE:
                             bayes_diffs_age.append(all_diffs_age[i][0])
                     else:
                         refused_raster_count += 1
                         if(verbose):
-                            trace_func(f"Refused raster with error {error[i]:.2f}. TBV: {all_diffs_tbv[i][0]:.2f}.")
+                            trace_func(f"Refused raster with bayesian error {error[i]:.2f}. TBV error: {all_diffs_tbv[i][0]:.2f}.")
                 
+                bayes_results = Final_results.Bayes_results(name=name)
+                bayes_results.set_refused_count(refused_raster_count, adjusted_max_bayes_mse)
                 if len(bayes_diffs_tbv) > 0:
-                    bayes_results = Final_results.Bayes_results()
-
-                    bayes_diffs_tbv = np.array(bayes_diffs_tbv)
+                    
                     bayes_avg_diff_tbv = round(np.mean(bayes_diffs_tbv), 2)
                     bayes_std_diff_tbv = round(np.std(bayes_diffs_tbv), 2)
-
                     bayes_results.set_tbv_error(bayes_avg_diff_tbv, bayes_std_diff_tbv)
                     
                     if train_mode == TrainMode.OUT_AGE:
@@ -723,63 +779,58 @@ def final_eval(model, dataloader, raw_dataset, device, train_mode, bayes_runs=30
                     
                     bayes_big_diffs = [diff for diff in bayes_diffs_tbv if diff > big_diff_threshold]
 
-                    bayes_results.set_big_diffs(len(bayes_big_diffs))
+                    if len(bayes_big_diffs) > 0:
+                        big_diff_mean = round(np.mean(bayes_big_diffs), 2)
+                        big_diff_std = round(np.std(bayes_big_diffs), 2)
+                    else:
+                        big_diff_mean = None
+                        big_diff_std = None
 
-                    final_results.set_bayes_results(bayes_results)
-                else:
-                    final_results.set_bayes_results(None)
+                    bayes_results.set_big_error(big_diff_mean, big_diff_std, len(bayes_big_diffs), big_diff_threshold)
 
-    if(verbose):
-        trace_func()
-        trace_func("- - - - - -")
-        trace_func(f"Total Raster Count: {len(all_diffs_tbv)}")
-        if bayes_runs and bayes_runs > 0: trace_func(f"Refused Raster Count: {refused_raster_count}")
-        trace_func("- - - - - -")
-        trace_func()
-        trace_func("- - - - - -")
-        trace_func("Non-bayesian prediction:")
-        trace_func(f"Mean Absolute Error: {avg_diff_tbv:.2f} cc")
-        trace_func(f"Standard Deviation: {std_diff_tbv:.2f} cc")
-        if train_mode == TrainMode.OUT_AGE:
-            trace_func(f"Mean Absolute Error Age: {avg_diff_age:.2f} days")
-            trace_func(f"Standard Deviation Age: {std_diff_age:.2f} days")
-        trace_func(f"Big error count (>{big_diff_threshold}): {len(all_big_diffs)}")
-        if(len(all_big_diffs) > 0):
-            trace_func(f"Big error mean: {np.mean(all_big_diffs):.2f} cc")
-            trace_func(f"Big error std: {np.std(all_big_diffs):.2f} cc")
-        trace_func("- - - - - -")
-        if bayes_runs and bayes_runs > 0:
-            trace_func()
-            trace_func("- - - - - -")
-            trace_func("Bayesian prediction:")
-            if len(bayes_diffs_tbv) > 0:
-                trace_func(f"Mean Absolute Error: {bayes_avg_diff_tbv:.2f} cc")
-                trace_func(f"Standard Deviation: {bayes_std_diff_tbv:.2f} cc")
-                if train_mode == TrainMode.OUT_AGE:
-                    trace_func(f"Mean Absolute Error Age: {bayes_avg_diff_age:.2f} days")
-                    trace_func(f"Standard Deviation Age: {bayes_std_diff_age:.2f} days")
-                trace_func(f"Big error count (>{big_diff_threshold}): {len(bayes_big_diffs)}")
-                if(len(bayes_big_diffs) > 0):
-                    trace_func(f"Big error mean: {np.mean(bayes_big_diffs):.2f} cc")
-                    trace_func(f"Big error std: {np.std(bayes_big_diffs):.2f} cc")
-            else:
-                trace_func("No rasters were accepted.")
-            trace_func("- - - - - -")
-        trace_func()
-
-    
-
-    if bayes_runs and bayes_runs > 0 and len(bayes_diffs_tbv) > 0:
-        final_results.set_tbv_error_bayes(bayes_avg_diff_tbv, bayes_std_diff_tbv)
-        if len(bayes_big_diffs) > 0:
-            final_results.set_big_error_bayes(len(bayes_big_diffs), np.mean(bayes_big_diffs), np.std(bayes_big_diffs))
-
-        if train_mode == TrainMode.OUT_AGE:
-            final_results.set_age_error_bayes(bayes_avg_diff_age, bayes_std_diff_age)
-    
+                final_results.add_bayes_results(bayes_results)
     return final_results
 
-def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
+
+def trace_results(final_results, trace_func):
+    trace_func()
+    trace_func("- - - - - -")
+    trace_func("Non-bayesian prediction:")
+    trace_func(f"Total Raster Count: {final_results.total_rasters}")
+    trace_func(f"Mean Absolute Error: {final_results.tbv_error_mean:.2f} cc")
+    trace_func(f"Standard Deviation: {final_results.tbv_error_std:.2f} cc")
+    if final_results.age_error_mean:
+        trace_func(f"Mean Absolute Error Age: {final_results.age_error_mean:.2f} days")
+        trace_func(f"Standard Deviation Age: {final_results.age_error_std:.2f} days")
+    trace_func(f"Big error count (>{final_results.big_error_threshold}): {final_results.big_error_count}")
+    if(final_results.big_error_count > 0):
+        trace_func(f"Big error mean: {final_results.big_error_mean:.2f} cc")
+        trace_func(f"Big error std: {final_results.big_error_std:.2f} cc")
+    trace_func("- - - - - -")
+    
+    for bres in final_results.bayes_results: 
+        trace_func()
+        trace_func(f"Bayesian prediction {bres.name}:")
+
+        trace_func(f"Refused Raster Count: {bres.refused_count}")
+        trace_func(f"Refused Raster Percentage: {bres.refused_count / final_results.total_rasters * 100:.2f}%")
+        trace_func(f"Refusal threshold: {bres.refusal_threshold}")
+        if bres.tbv_error_mean:
+            trace_func(f"Mean Absolute Error: {bres.tbv_error_mean:.2f} cc")
+            trace_func(f"Standard Deviation: {bres.tbv_error_std:.2f} cc")
+            if bres.age_error_mean:
+                trace_func(f"Mean Absolute Error Age: {bres.age_error_mean:.2f} days")
+                trace_func(f"Standard Deviation Age: {bres.age_error_std:.2f} days")
+            trace_func(f"Big error count (>{bres.big_error_threshold}): {bres.big_error_count}")
+            if bres.big_error_count > 0:
+                trace_func(f"Big error mean: {bres.big_error_mean:.2f} cc")
+                trace_func(f"Big error std: {bres.big_error_std:.2f} cc")
+        else:
+            trace_func("No rasters were accepted.")
+    trace_func("- - - - - -")
+    trace_func()
+    
+def run_folds(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
         optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, 
         early_stop_ignore_first_epochs= 100,  batch_size=8, data_workers=4, trace_func=print, 
         scheduler_class=None, scheduler_params={}, k_fold=6, grad_clip=5, override_val_pids=None,
@@ -845,6 +896,7 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
         train_dataloader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=data_workers, pin_memory=True)
         val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=data_workers, pin_memory=True)
         
+        train_set.set_mode(TrainDataset.TransformMode.NORMAL)
         train_loss_list, val_loss_list = train(
             model, criterion, optimizer, train_dataloader, val_dataloader, early_stopper, 
             train_mode, num_epochs, device, trace_func=trace_func, scheduler=scheduler,
@@ -862,6 +914,8 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
                        trace_func=trace_func, verbose=True)
         )
 
+        trace_results(final_results[-1], trace_func=trace_func)
+
         os.rename("best_weights.pt", f"best_weights_{i+1}.pt")
 
         if override_val_pids:
@@ -874,3 +928,51 @@ def run(model, raw_dataset, device, optimizer_class, criterion_class, train_mode
         os.remove("base_weights.pt")
     
     return train_score, val_score, final_results
+
+def run_final(model, raw_dataset, device, optimizer_class, criterion_class, train_mode, 
+        optimizer_params={}, criterion_params={}, num_epochs=500, patience=100, 
+        early_stop_ignore_first_epochs= 100, batch_size=8, data_workers=4, trace_func=print, 
+        scheduler_class=None, scheduler_params={}, grad_clip=5,
+        dropout_change=0.0, dropout_change_epochs=10, dropout_range=(0.0, 1.0),
+        bayes_runs=30, max_bayes_mse=9.0, eval_only=False):
+
+    train_score = []
+    final_results = []
+    
+    all_pids = raw_dataset.get_unique_pids()
+    
+    dataset = TrainDataset(raw_dataset, all_pids)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=data_workers, pin_memory=True)
+
+    trace_func(f"Train volume count: {len(dataloader)}")
+    trace_func()
+    
+    if not eval_only:
+        criterion = criterion_class(**criterion_params)
+        optimizer = optimizer_class(model.parameters(), **optimizer_params)
+        scheduler = None if not scheduler_class else scheduler_class(optimizer, **scheduler_params)
+        early_stopper = EarlyStopper(
+            patience=patience, ignore_first_epochs=early_stop_ignore_first_epochs, 
+            verbose=False, path="best_weights.pt", trace_func=trace_func
+        )
+
+        dataset.set_mode(TrainDataset.TransformMode.NORMAL)
+        train_score, _ = train(
+            model, criterion, optimizer, dataloader, None, early_stopper, 
+            train_mode, num_epochs, device, trace_func=trace_func, scheduler=scheduler,
+            dropout_change=dropout_change, dropout_change_epochs=dropout_change_epochs, dropout_range=dropout_range, 
+            grad_clip=grad_clip
+        )
+    
+        model.load_state_dict(torch.load("best_weights.pt"))
+
+    final_results = final_eval(model, dataloader, dataset, device, train_mode, 
+                    bayes_runs=bayes_runs, max_bayes_mse=max_bayes_mse,
+                    trace_func=trace_func, verbose=True)
+    
+    trace_results(final_results, trace_func=trace_func)
+
+    if os.path.exists("best_weights.pt"):
+        os.rename("best_weights.pt", "final_weights.pt")
+    
+    return train_score, final_results

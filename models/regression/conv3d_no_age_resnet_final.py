@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from matplotlib.transforms import Affine2D
 
+import argparse
 import os
 import json
 import torch
@@ -103,12 +104,24 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, no_crop=True, no_deform=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", type=str, default="../../dataset/original", help="Path to the dataset directory")
+    parser.add_argument("--eval", type=str, default=None, help="Path to weights to evaluate, if any")
+    args = parser.parse_args()
+
+    eval_only = args.eval is not None
+
+    torch.set_num_threads(16)
+
+    raw_dataset = RawDataset(data_dir=args.data_dir, side_len=96, no_crop=True, no_deform=False)
     model = RasterNet(ResidualBlock, [3, 3, 5, 4]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
-    with open("plots/conv3d_no_age_resnet_log.txt", "w") as f:
+    if eval_only:
+        model.load_state_dict(torch.load(args.eval))
+
+    with open("plots/conv3d_no_age_resnet_final_log.txt", "w") as f:
         
         def logger(file):
             def log_to_file(msg="", end="\n"):
@@ -116,28 +129,32 @@ if __name__ == "__main__":
                 if end != '\r':
                     file.write(msg + end)
             return log_to_file
-
-        tr_score, val_score, final_results = run_folds(
+        
+        score, final_results = run_final(
             model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.NO_AGE,
             optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
-            k_fold=6, num_epochs=300, patience=75, early_stop_ignore_first_epochs=100, 
-            batch_size=8, data_workers=8, trace_func=logger(f),
+            num_epochs=300, patience=50, early_stop_ignore_first_epochs=100, 
+            batch_size=8, data_workers=0, trace_func=logger(f),
             dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
             scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
             scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
-            bayes_runs=30, max_bayes_mse=9.0,
-            #override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
+            bayes_runs=30, max_bayes_mse=51.0, eval_only=eval_only
         )
-        
-        # first fold training and validation loss plot
-        plt.plot(tr_score[0], label="Training Loss", linewidth=1.0)
-        plt.plot(val_score[0], label="Validation Loss", linewidth=1.0)
+        # Training loss plot log
+        plt.plot(score, label="Training Loss", linewidth=1.0)
         plt.xlabel("Epochs")
         plt.ylabel("Loss")
         plt.yscale("log")
         plt.legend()
-        plt.savefig("plots/conv3d_no_age_resnet.png")
+        plt.savefig("plots/conv3d_no_age_resnet_log_final.png")
+        plt.clf()
 
+        plt.plot(score, label="Training Loss", linewidth=1.0)
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.legend()
+        plt.savefig("plots/conv3d_no_age_resnet_final.png")
+        
         # Move best weights and plot to folders
         if not os.path.exists("weights"):
             os.makedirs("weights")
@@ -151,60 +168,33 @@ if __name__ == "__main__":
             "voxels_std": raw_dataset.voxels_std
         }
 
-        with open(os.path.join("weights", "conv3d_no_age_resnet.json"), "w") as f:
+        with open(os.path.join("weights", "conv3d_no_age_resnet_final.json"), "w") as f:
             json.dump(label_std_params, f, indent=2)
         
-        final_stats = [r.to_dict() for r in final_results]
-        with open(os.path.join("plots", "conv3d_no_age_resnet_stats.json"), "w") as f:
+        final_stats = final_results.to_dict()
+        with open(os.path.join("plots", "conv3d_no_age_resnet_final_stats.json"), "w") as f:
             json.dump(final_stats, f, indent=2)
         
-        for i in range(len(final_results)):
-            os.rename(f"best_weights_{i+1}.pt", f"weights/conv3d_no_age_resnet_{i+1}.pt")
+        if not eval_only:
+            os.rename("final_weights.pt", "weights/conv3d_no_age_resnet_final.pt")
 
-        if len(final_results) == 6:
-            plt.clf()
-            figure, axis = plt.subplots(3, 2)
-            for i in range(3):
-                for j in range(2):
-                    axis[i][j].plot(tr_score[i*2+j], label="Training Loss", linewidth=0.7)
-                    axis[i][j].plot(val_score[i*2+j], label="Validation Loss", linewidth=0.7)
-                    axis[i][j].set_xlabel("Epochs")
-                    axis[i][j].set_ylabel("Loss")
+        bayes0 = final_stats["bayes_results"][0]
+        bayes1 = final_stats["bayes_results"][1]
+        bayes2 = final_stats["bayes_results"][2]
+        del final_stats["bayes_results"]
 
-            handles, labels = axis[i][j].get_legend_handles_labels()
-            figure.legend(handles, labels, loc='lower center')
+        final_stats["name"] = "No Filtering"
+        bayes0["name"] = "Dropout + Transforms"
+        bayes1["name"] = "Transforms"
+        bayes2["name"] = "Dropout"
 
-            figure.tight_layout()
-            plt.savefig("plots/conv3d_no_age_resnet_folds.png", dpi=300)
+        res = [final_stats, bayes0, bayes1, bayes2]
+        res = pd.DataFrame.from_records(res)
 
+        plt.clf()
+        plt.errorbar(x=res["name"], y=res["tbv_error_mean"], yerr=res["tbv_error_std"], fmt='o')
+        
+        plt.ylabel("TBV Loss")
+        plt.savefig("plots/conv3d_no_age_resnet_final_folds_bayes.png")
 
-            bayes0 = [fold["bayes_results"][0] for fold in final_stats]
-            bayes1 = [fold["bayes_results"][1] for fold in final_stats]
-            bayes2 = [fold["bayes_results"][2] for fold in final_stats]
-            for fold in final_stats:
-                del fold["bayes_results"]
-
-            no_filtering_stats = pd.DataFrame.from_records([r.to_dict() for r in final_results])
-            bayes0_stats = pd.DataFrame.from_records(bayes0)
-            bayes1_stats = pd.DataFrame.from_records(bayes1)
-            bayes2_stats = pd.DataFrame.from_records(bayes2)
-
-            plt.clf()
-            figure, axis = plt.subplots()
-            
-            trans0 = Affine2D().translate(-0.15, 0.0) + axis.transData
-            trans1 = Affine2D().translate(-0.05, 0.0) + axis.transData
-            trans2 = Affine2D().translate(0.05, 0.0) + axis.transData
-            trans3 = Affine2D().translate(0.15, 0.0) + axis.transData
-            
-            axis.errorbar(x=range(1,7), y=no_filtering_stats["tbv_error_mean"], yerr=no_filtering_stats["tbv_error_std"], fmt='o', label="No filtering", transform=trans0)
-            axis.errorbar(x=range(1,7), y=bayes0_stats["tbv_error_mean"], yerr=bayes0_stats["tbv_error_std"], fmt='o', label=bayes0[0]["name"], transform=trans1)
-            axis.errorbar(x=range(1,7), y=bayes1_stats["tbv_error_mean"], yerr=bayes1_stats["tbv_error_std"], fmt='o', label=bayes1[0]["name"], transform=trans2)
-            axis.errorbar(x=range(1,7), y=bayes2_stats["tbv_error_mean"], yerr=bayes2_stats["tbv_error_std"], fmt='o', label=bayes2[0]["name"], transform=trans3)
-            
-            axis.set_xlabel("Fold")
-            axis.set_ylabel("TBV Loss")
-            figure.legend()
-            figure.savefig("plots/conv3d_no_age_resnet_folds_bayes.png")
-
-            
+        

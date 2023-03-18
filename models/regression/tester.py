@@ -7,10 +7,8 @@ import pandas as pd
 import argparse
 
 import torch
-import torch.nn as nn
 import torchio as tio
 from torch.utils.data import DataLoader
-from numba import jit
 
 torch.manual_seed(0)
 np.random.seed(0)
