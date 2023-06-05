@@ -10,6 +10,8 @@ import torch
 import torchio as tio
 from torch.utils.data import DataLoader
 
+from models.conv3d_no_age import RasterNet, ResidualBlock
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -177,8 +179,6 @@ class Dataset(torch.utils.data.Dataset):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(type=str, dest="model_name", help="Name of the model to test (simple, resnet)")
-    parser.add_argument("--use_age", action="store_true", help="Use age in the model")
     parser.add_argument("--skip_bayesian", action="store_true", help="Skip bayesian dropout")
     parser.add_argument("--use_latest", action="store_true", help="Use latest weights instead of best")
     parser.add_argument("--mode", type=str, default="lenient", help="Refuse raster option (lenient, normal, strict)")
@@ -191,23 +191,16 @@ if __name__ == "__main__":
 
     print("Loading model and dataset...")
     
-    weights_file = f"conv3d_{'no_' if not args.use_age else ''}age_{args.model_name}{'_best' if not args.use_latest else ''}.pt"
-    params_file = f"conv3d_{'no_' if not args.use_age else ''}age_{args.model_name}{'_best' if not args.use_latest else ''}.json"
+    weights_file = f"conv3d_no_age_{args.model_name}{'_best' if not args.use_latest else ''}.pt"
+    params_file = f"conv3d_no_age_{args.model_name}{'_best' if not args.use_latest else ''}.json"
 
     pids = ['23', '48', '38', '1', '80', '22', '27', '36']
     with open(os.path.join(args.weights_dir, params_file)) as f:
         std_params = json.load(f)
 
-    if args.model_name == "simple":
-        from conv3d_no_age_simple import RasterNet
-        model = RasterNet()
-    elif args.model_name == "resnet":
-        from conv3d_no_age_resnet import RasterNet, ResidualBlock
-        model = RasterNet(ResidualBlock, [3, 3, 5, 4])
-        model.do.p = 0.3
-        model.enable_dropblock = False
-    else:
-        raise ValueError("Invalid model name")
+    model = RasterNet(ResidualBlock, [3, 3, 5, 4])
+    model.do.p = 0.3
+    model.enable_dropblock = False
 
     dataset = Dataset(
         data_dir=args.data_dir, pids=pids, std_params=std_params, output_noise=args.noise, 

@@ -15,8 +15,8 @@ ctk.set_default_color_theme("dark-blue")
 class BrainVisualizer(ctk.CTk):
     def __init__(self):
         self.default_path = "/home/daru/code/tbv/dataset/original/1_01-03-2018.nrrd"
-        self.weights_path = "/home/daru/code/tbv/visualizer/network/weights.pt"
-        self.norm_path = "/home/daru/code/tbv/visualizer/network/norm.json"
+        self.weights_path = "/home/daru/repos/tbv/visualizer/network/weights.pt"
+        self.norm_path = "/home/daru/repos/tbv/visualizer/network/norm.json"
         
         self.predictor = Predictor(self.weights_path, self.norm_path)
 

@@ -59,8 +59,8 @@ class RasterNet(nn.Module):
 
         self.do = nn.Dropout(p=0.0)
         
-        self.fc0 = nn.Linear(513, 1024)
-        self.fc1 = nn.Linear(1024, 1)
+        self.fc0 = nn.Linear(512, 1024)
+        self.fc1 = nn.Linear(1024, 2)
 
         self.enable_dropblock = True
 
@@ -80,8 +80,8 @@ class RasterNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, raster, age):
-        x = self.conv0(raster)
+    def forward(self, x):
+        x = self.conv0(x)
         x = self.layer0(x)
         if self.enable_dropblock: x = ops.drop_block3d(x, block_size=3, p=self.do.p, training=self.training)
         x = self.layer1(x)
@@ -91,8 +91,6 @@ class RasterNet(nn.Module):
 
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        x = torch.cat((x, age), dim=1)
-
         x = self.do(x)
         x = F.relu(self.fc0(x))
         x = self.do(x)
@@ -104,20 +102,21 @@ class RasterNet(nn.Module):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 if __name__ == "__main__":
-    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, crop_factor=0.8)
+    raw_dataset = RawDataset(data_dir="../../dataset/original", side_len=96, no_crop=True, no_deform=False)
     model = RasterNet(ResidualBlock, [3, 3, 4, 4]).to(cuda)
     
     print(f"Model has {model.count_parameters()} trainable parameters")
 
-    tr_score, val_score, unscaled_loss = run(
-        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.IN_AGE,
+    tr_score, val_score, unscaled_loss = run_folds(
+        model, raw_dataset, cuda, optimizer_class=torch.optim.SGD, criterion_class=nn.MSELoss, train_mode=TrainMode.OUT_AGE,
         optimizer_params={"lr": 0.001, "momentum": 0.9, "weight_decay": 0.0005, "nesterov": True}, criterion_params={},
-        k_fold=6, num_epochs=1000, patience=100, early_stop_ignore_first_epochs=150, 
+        k_fold=6, num_epochs=300, patience=75, early_stop_ignore_first_epochs=100, 
         batch_size=8, data_workers=8, trace_func=print,
         dropout_change=0, dropout_change_epochs=1, dropout_range=(0.3, 0.3),
         scheduler_class=torch.optim.lr_scheduler.ReduceLROnPlateau,
         scheduler_params={"mode": "min", "factor": 0.4, "patience": 10, "threshold": 0.0001, "verbose": True},
-        override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
+        bayes_runs=30, max_bayes_mse=9.0,
+        #override_val_pids=['23', '48', '38', '1', '80', '22', '27', '36']
     )
     
     # first fold training and validation loss plot
@@ -135,14 +134,18 @@ if __name__ == "__main__":
         os.makedirs("plots")
     
     label_std_params = {
-        "voxels_min": raw_dataset.voxels_minmax.data_min_.item(),
-        "voxels_max": raw_dataset.voxels_minmax.data_max_.item(),
-        "voxels_mean": raw_dataset.voxels_std.mean_.item(),
-        "voxels_std": raw_dataset.voxels_std.scale_.item()
+        "voxels_min": raw_dataset.voxels_min,
+        "voxels_max": raw_dataset.voxels_max,
+        "voxels_mean": raw_dataset.voxels_mean,
+        "voxels_std": raw_dataset.voxels_std,
+        "age_min": raw_dataset.age_min,
+        "age_max": raw_dataset.age_max,
+        "age_mean": raw_dataset.age_mean,
+        "age_std": raw_dataset.age_std
     }
 
-    with open(os.path.join("weights", "conv3d_in_age_resnet.json"), "w") as f:
+    with open(os.path.join("weights", "conv3d_out_age_resnet.json"), "w") as f:
         json.dump(label_std_params, f)
-    plt.savefig("plots/conv3d_in_age_resnet.png")
-    os.rename("best_weights.pt", "weights/conv3d_in_age_resnet.pt")
+    plt.savefig("plots/conv3d_out_age_resnet.png")
+    os.rename("best_weights.pt", "weights/conv3d_out_age_resnet.pt")
     

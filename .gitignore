@@ -3,6 +3,7 @@ dataset/cut/
 dataset/original/
 dataset/segmented/
 dataset/untagged/
+dataset/dataset/
 raw/
 models/test.py
 *.pt
