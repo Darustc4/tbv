@@ -6,7 +6,6 @@ dataset/untagged/
 dataset/dataset/
 raw/
 models/test.py
-*.pt
 models/regression/weights
 
 # Byte-compiled / optimized / DLL files
